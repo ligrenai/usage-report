@@ -1,145 +1,235 @@
 # usage-report
 
-Turn local Codex CLI rollouts into an API-price-equivalent usage report: sol vs astra (or any model), per day and per weekly quota cycle, priced from the live OpenAI pricing page.
+Local Codex CLI usage, valued at OpenAI API prices.
 
-```
-python3 scripts/fetch_prices.py                       # prices.json  <- developers.openai.com/api/docs/pricing (standard tier)
-python3 scripts/collect.py                            # out/usage.json  single account ($CODEX_HOME or ~/.codex); daily 14 d, cycles 30 d
-python3 scripts/render.py [--theme dark]              # out/report.html (self-contained; open and screenshot)
-```
+Price usage from local rollout files, rebuild weekly quota cycles per account,
+render a self-contained HTML report, and write a data brief for a social-post chart.
+Usage collection reads only files already on disk: no provider API calls, CLI
+invocations, or quota polling. The price fetcher downloads the public pricing page.
+**USD means API-equivalent value, not money paid.**
 
-Multi-account example (this machine):
-```
-python3 scripts/collect.py --home work=/path/to/codex-home-1 personal=/path/to/codex-home-2 \
-    --account-from personal=2026-09-08 --since 2026-09-01
-```
+**Python 3.9+ · Standard library only · [Apache-2.0](LICENSE)**
 
-Options: `--since/--until`, `--last-days 14` (daily), `--cycle-days 30` (quota cycles), `--tz 8`, `--provider codex` (providers live in `scripts/providers/`; only codex today).
-```
-```
+## Quick start
 
-Files
-- `scripts/fetch_prices.py` — parses the pricing page's embedded tables (standard tier, short/long context). Cached in `prices.json`; `prices.bundled.json` is an offline fallback; `prices.overrides.json` is merged on top for prices the page does not publish.
-- `scripts/providers/codex.py` — provider module (home discovery, rollout parsing); new providers register in `providers/__init__.py`.
-- `scripts/collect.py` — read-only scan of `rollout-*.jsonl`; per-request tokens from `token_usage_record` (fallback: deltas of `token_count.total_token_usage`); quota cycles from `rate_limits.primary` (`used_percent`, `resets_at`).
-- `scripts/render.py` — single-file HTML dashboard (SVG charts, tables), light or dark theme.
-- `KEY-FIGURES.md` — reference measurements from 2026-09.
-
-No dependencies beyond Python 3. Nothing is written outside this directory; rollouts are never modified.
-
-## Render the dashboard
+Run from the project directory. The default account uses `CODEX_HOME`, falling
+back to `~/.codex`; its rollout files must already exist under `sessions/`.
 
 ```bash
+python3 scripts/fetch_prices.py
+python3 scripts/collect.py
 python3 scripts/render.py
-python3 scripts/render.py --theme dark --out out/report-dark.html
-python3 scripts/render.py --in out-acc3/usage.json --out out-acc3/report.html
-python3 scripts/render.py --in out/usage.json --out out/report.html --title "Local usage report"
 ```
 
-Open `out/report.html` directly (`file://` works). Each report is one HTML file,
-with embedded JSON, CSS and JavaScript, no dependencies or external assets.
-JavaScript is required. Light is the default theme; the page also has a theme toggle.
-The default title is "Codex usage, valued at API prices". All interface text is in English.
+These write `prices.json`, `out/usage.json`, and `out/report.html`. Open the HTML
+in a browser with JavaScript enabled; no web server is needed. For a preview,
+open the included [example report](examples/report.html).
 
-The report covers the investigated period without an era comparison. The optional
-`summary.per_model_full_window` block starts collapsed. Its cards show average USD,
-input/output tokens, hours, USD and input per 1% quota, contributing accounts/window
-counts, and long-context share. Each card shows the supplied summary for one model
-across contributing accounts.
-Qualifying complete cycles have peak quota at or above `complete_pct`, at least 50
-consumed points, and one base model with at least 75% of input. Each window is scaled
-to 100% before averaging by model. The optional social-post era summary is ignored entirely.
+By default, daily data starts 14 days before today and cycles start 30 days
+before today, with today included. The two ranges are independent.
 
-Dates and times are formatted in the viewer's browser time zone, identified once
-in the header. Both the daily chart and table are built from UTC `hourly` buckets,
-re-bucketed by local day; `meta.tz_offset_hours` and precomputed `daily` values do not
-control the display. Cycle start/end/peak use their `*_utc` fields. The first and
-last local day may be partial because the source range consists of UTC days.
-Hourly buckets use their local start, so fractional-hour-offset zones retain only
-hour-level precision at day boundaries. Older snapshots without hourly data and UTC
-cycle timestamps must be recollected.
+### Multiple accounts
 
-The overview shows period USD for each model key, complete-cycle medians by
-dominant model family, and an account-switchable daily chart. Every model key,
-including `[1m]`, has separate chart legend entries and daily/cycle table columns;
-small models are never grouped into "other". `[1m]` uses a darker, hatched version
-of the base model's colour. The quota line and total column show "quota % (sum over accounts)": daily
-percentage points summed across accounts, or for the selected account.
-Daily details place the date and existing account columns first, followed by
-Observed total USD, quota %, and per-model input/output/USD groups. Auto-review
-model groups come last; other models retain their order, with each base model
-followed by its `[1m]` variant. Model groups with only zero or missing input,
-output and USD are hidden for the displayed rows, recalculated when the account
-selection changes. Cycle details apply the same empty-group rule to their rows.
-Cycle details place Total USD and USD / 1% quota after the account/window/quota
-and status columns, before the per-model input/output/USD groups; Reset time stays last.
-All token labels use K (thousands, below 1 million), M (millions), or B (billions,
-starting at 1 billion). Daily and cycle token cells, including daily totals, and
-chart tooltip token labels expose raw counts with thousands separators only on hover.
-Plan tier is not shown: the plan_type reported in the CLI logs did not match the owner's records for every account.
-Optional `meta.plans` and `cycles[].plan` fields are ignored by the display.
+Give each home a distinct label. Each path is a Codex home containing `sessions/`.
 
-Daily account USD is the sum of that account's local-day model bucket `usd` values.
-Quota metadata and `usd_standard` are excluded; base and `[1m]` keys are each counted
-once. The observed total sums accounts. Page `console.assert` checks reconcile each
-day, each account, and the table footer with chart data. The previous renderer used
-UTC `daily` dates directly, so its daily amounts did not describe browser-local days;
-the audit found no quota-as-USD or base/long double counting in that calculation.
+```bash
+python3 scripts/collect.py --home work=/path/to/codex-home personal=/path/to/codex-home-2
+python3 scripts/render.py
+```
 
-Cycle badges show `consumed_pct` and account headings identify accounts. A subtle check
-marks cycles whose peak reaches `complete_pct`. Hover, focus, or tap a cycle for its
-account, local interval/peak, hours, used percentage, total input/output, USD,
-USD per 1%, and each model key's breakdown. Daily bars use the same tooltip
-interactions; left/right arrows move between dates and Escape dismisses the tooltip.
-Tables and prices remain in expandable sections, and motion respects reduced-motion
-settings. Single-account mode hides the account switcher and identifies the account
-in section headings.
+Alternatively, use `--accounts-root` for a directory containing account homes,
+with `--accounts` to select child directory names.
 
-To load current JSON when the HTML is served by a web server:
+### Date range and time zone
+
+Dates are inclusive. `--tz` is a fixed, whole-hour UTC offset; it controls the
+collector's daily buckets and the social brief. The HTML uses the viewer's time zone.
+
+```bash
+python3 scripts/collect.py --since 2026-09-01 --until 2026-09-14 --tz 8
+python3 scripts/render.py
+```
+
+For a report you will share, collect with `--redact-homes` before rendering:
+
+```bash
+python3 scripts/collect.py --redact-homes
+python3 scripts/render.py --theme dark
+```
+
+This redacts `meta.homes`. Account labels and usage remain; `meta.prices_overrides`
+can still contain a local path. Review the JSON and embedded report data before sharing.
+
+### Common CLI flags
+
+| Script | Flags | Purpose |
+| --- | --- | --- |
+| `collect.py` | `--home`, `--accounts-root`, `--accounts` | Select one or more account homes. |
+| `collect.py` | `--since`, `--until` | Set inclusive date boundaries. Cycles keep their full observed intervals. |
+| `collect.py` | `--last-days`, `--cycle-days` | Set daily/cycle lookback when `--since` is absent; defaults: 14/30. |
+| `collect.py` | `--account-from` | Set an account's start date with `LABEL=YYYY-MM-DD`; see limitations below. |
+| `collect.py` | `--tz` | Set the daily bucket UTC offset; default: 0. |
+| `collect.py` | `--prices`, `--out`, `--redact-homes` | Select price JSON, output directory, and home-path redaction. |
+| `collect.py` | `--complete-pct`, `--min-samples`, `--min-tokens` | Cycle thresholds; defaults: 95%, 20 samples, 20 million input tokens. |
+| `fetch_prices.py` | `--from-file`, `--out` | Parse a saved pricing page or choose the price JSON output. |
+| `render.py` | `--in`, `--out`, `--title`, `--theme`, `--data-url` | Select JSON, HTML output, title, light/dark theme, or live JSON URL. |
+| `brief.py` | `--by`, `--days`, `--accounts`, `--day-accounts`, `--phase`, `--split` | Choose chart variant, data filters, phase labels, and a model-switch marker. |
+
+## How it works
+
+### Local data sources
+
+The Codex provider scans `sessions/YYYY/MM/DD/rollout-*.jsonl` under each home.
+It reads per-request `token_usage_record` events. For older rollouts without
+those events, it uses deltas of `token_count.info.total_token_usage`.
+
+Quota samples come from `rate_limits.primary` or `rate_limits.secondary` when
+`window_minutes` identifies a weekly window (at least 10,000 minutes). Cycles
+are grouped per account by `resets_at`, rounded down to ten-minute boundaries.
+Daily quota consumption sums increases in each window's running maximum.
+
+### Pricing
+
+- [scripts/fetch_prices.py](scripts/fetch_prices.py) extracts standard-tier tables
+  from the OpenAI pricing page and caches short/long-context rates in `prices.json`.
+- Requests with input **above 272,000 tokens** use the long-context column and the
+  model key `<model>[1m]`. The threshold is stored in `long_context_threshold`.
+- [prices.overrides.json](prices.overrides.json) fills unpublished model/context
+  prices when that context has no input rate. Published contexts take precedence.
+  Applied entries appear in `meta.prices_overrides_used`; the included overrides
+  also price `codex-auto-review` at `gpt-5.6-luna` rates (no published rate exists).
+- Missing long-context rates fall back to short-context rates. Unknown models
+  use the price file's `fallback_model`; their fallback rates are not listed in
+  the report because that identifier is not exported into usage metadata.
+- `usd` prices uncached input, cached input, and output separately.
+  `usd_standard` prices the same tokens at short-context rates.
+  `billable_uncached`, `billable_cached`, and `billable_output` weight each token
+  type by its long/short price ratio, so social-chart bars follow the pricing rule.
+
+To work offline, keep the cached prices or explicitly select the bundled snapshot:
+
+```bash
+python3 scripts/collect.py --prices prices.bundled.json
+```
+
+### HTML report
+
+The report embeds JSON, CSS, JavaScript, SVG charts, and tables in one HTML file.
+It includes period totals, daily usage, weekly quota cycles, complete-cycle
+medians, and expandable details and pricing tables.
+
+- Dates use the **viewer's browser time zone**, rebuilding local days from UTC
+  `hourly` buckets. Edge days can be partial; fractional-hour zones have only
+  hour-level precision at day boundaries. Older JSON without hourly buckets and
+  UTC cycle timestamps must be recollected.
+- Token labels use **K/M/B** units, with exact counts available on hover.
+  Each model key, including `[1m]`, has separate columns; empty model groups hide.
+- Multiple accounts have an account selector. Single-account mode hides it and
+  identifies the account in headings. Light is the default; a theme toggle and
+  `--theme dark` are available.
+- Weekly medians use raw complete-cycle USD, including mixed-model usage.
+  The optional `summary.per_model_full_window` section scales qualifying cycles
+  to 100% before averaging: at least 50 consumed quota points and one base model
+  responsible for at least 75% of input tokens.
+
+For HTML served by a web server, fetch updated JSON once at page load:
 
 ```bash
 python3 scripts/render.py --data-url usage.json --out out/report.html
 ```
 
-`--data-url URL` resolves relative to the HTML URL and fetches once at page load.
-The embedded snapshot remains visible while loading and is used if the request
-fails, times out, or returns invalid data. A retry button appears on failure.
-Cross-origin URLs require the server to permit CORS; opening via `file://` may block
-the fetch and use the embedded snapshot. Without this flag, the page makes no requests.
+The URL resolves relative to the HTML URL. The embedded snapshot remains the
+fallback on failure. Cross-origin URLs require CORS; local file access may block
+fetching. Without `--data-url`, the report makes no network requests.
 
-Weekly median dominance means the largest share of the cycle's USD by model family;
-ties are listed separately. Medians use raw complete-cycle USD, including mixed
-usage, with no extrapolation to 100%. Complete means
-peak quota reached the threshold (normally ≥95%); observation need not start at 0%.
-Cycle and daily ranges are independent. Resets can push daily consumption above
-100%. Missing records display as gaps/`—`, not zero usage.
+## Output schema
 
-The pricing table has one row per observed model key. Columns show standard input,
-cached input and output rates, plus applied long-context input/cached/output rates
-for `[1m]` rows. Rates are per million tokens; recorded USD includes the long-context
-surcharge, whereas `usd_standard` prices the same tokens at standard rates.
-Unknown fallback rates are explicitly left unlisted rather than guessed.
-The auto-review row is marked "priced at gpt-5.6-luna rates (owner decision)".
+`out/usage.json` has five top-level sections. Selected field names:
 
+| Section | Fields / nesting |
+| --- | --- |
+| `meta` | `provider`, `generated`, `accounts`, `homes`, `plans`, `since`, `until`, `cycle_since`, `account_from`, `tz_offset_hours`, `long_context_threshold`, `prices`, `prices_source`, `prices_fetched_at`, `prices_overrides`, `prices_overrides_used`, `complete_pct`, `notes` |
+| `daily` | date → account → model key; account-level `_usage_pct` |
+| `hourly` | UTC hour → account → model key; account-level `_usage_pct` |
+| `cycles` | `account`, `plan`, `start`, `end`, `start_utc`, `end_utc`, `peak_at`, `peak_at_utc`, `resets_at_utc`, `hours`, `start_pct`, `peak_pct`, `end_pct`, `consumed_pct`, `complete`, `input`, `output`, `usd`, `usd_per_pct`, `usd_standard`, `usd_standard_per_pct`, `by_model` |
+| `summary` | `per_model_full_window`, `per_era_full_window`, `method` |
 
-## Social-post chart (image generator)
+Model buckets in `daily`, `hourly`, and `cycles[].by_model` share:
+`model`, `context`, `input`, `cached`, `output`, `requests`, `usd`, `usd_standard`,
+`billable_uncached`, `billable_cached`, `billable_output`.
 
+## Social-post chart
+
+Choose the audience's UTC offset when collecting, then generate a Markdown brief.
+Create the output directory first; `brief.py` does not create it.
+
+```bash
+mkdir -p .dispatch
+python3 scripts/brief.py --in out/usage.json --by model --out .dispatch/data-brief.md
 ```
-python3 scripts/collect.py ... --tz -7 --since 2026-08-20 --until 2026-09-12 --out out-sf     # pick the time zone of the audience
-python3 scripts/brief.py --in out-sf/usage.json --by model --split 2026-09-03 --out .dispatch/data-brief.md
+
+**Variant A** (`--by model`, the default) stacks daily billable tokens by model key.
+For **variant B**, stack them by read, cache read, and write (output):
+
+```bash
+python3 scripts/brief.py --in out/usage.json --by type --out .dispatch/data-brief.md
 ```
 
-`brief.py` writes a Markdown brief with one row per local day (billable tokens per model key, or per token type with `--by type`,
-quota %, USD, and the line value = USD ÷ quota % × 100), summary tiles per `--phase` label, and the footer text. Give the brief
-and a prompt from `references/imagegen-prompts.md` to an image-capable agent (codex CLI `$imagegen`); it must use only the brief's
-numbers, read the image back and check them. Filters: `--days`, `--accounts`, `--day-accounts DAY=acc1,acc2`, `--min-pct`.
-Fields used: `billable_uncached`, `billable_cached`, `billable_output` (long-context tokens weighted like the price list), `usd`, `_usage_pct`.
+Both use the line **full-weekly-quota API value = USD ÷ quota % × 100**.
+`--min-pct` suppresses line values below 5% by default. Use `--days`, `--accounts`,
+and `--day-accounts` to select comparable observations; `--phase` labels summary
+tiles and `--split` marks a model switch. `--tz-label` changes header text only.
 
-## Example report
+Hand the brief and the matching [image-generator prompt](references/imagegen-prompts.md)
+to an image-capable agent. Every number must come from the brief. Read the image
+back and verify its numbers and labels before publishing.
 
-`examples/report.html` is a rendered report (four accounts, September 2026, account names replaced, home paths redacted with
-`collect.py --redact-homes`). Open it in a browser to see the layout before running the scripts on your own logs.
+## Use as a skill
+
+Copy this entire project folder into your agent's skills directory, keeping
+[SKILL.md](SKILL.md) at the folder root alongside the scripts, price files, and
+references. The skill describes the collection, reporting, and chart handoff workflow.
+
+## Accuracy and limitations
+
+- **This machine only.** Usage on other machines is invisible. Compare complete
+  cycles observed locally from 0% to 100%; a `complete` badge only means the observed
+  peak reached `--complete-pct` (95% by default), even if observation began above 0%.
+- Cycles retain their full observed intervals and can extend beyond the selected
+  daily range. Sparse or low-token cycles are filtered by the cycle thresholds.
+- `input` includes cached tokens; `output` includes reasoning tokens. Cache writes
+  are not counted because rollout files provide no counter.
+- Plan tier is recorded in JSON but hidden in the report because logged `plan_type`
+  values were observed to disagree with the actual subscription tier.
+- Old rollouts use cumulative-total deltas; per-request attribution depends on the
+  information available in those logs.
+- `--account-from` filters token records and cycle starts, but currently does not
+  filter daily/hourly quota samples. Quota percentages can therefore include earlier usage.
+- Daily quota percentages sum across accounts and resets, so they can exceed 100%.
+  The brief's extrapolated line is an estimate based on each selected day's usage.
+
+## Providers
+
+Only `codex` is supported today (`--provider codex`). To add a provider, create
+its module under [scripts/providers/](scripts/providers/) and register its `NAME`
+in `PROVIDERS` in [scripts/providers/__init__.py](scripts/providers/__init__.py).
+Use [scripts/providers/codex.py](scripts/providers/codex.py) as the interface reference:
+
+- `parse_homes(specs)`, `default_homes(args)`, `expand_root(root, names=None)` return
+  a mapping of account labels to home paths.
+- `scan(homes)` returns `(records, ratelimits)`. Records contain
+  `(ts_iso_utc, account_label, model, input_tokens, cached_input_tokens, output_tokens, request_input_size)`.
+  Rate limits map account labels to `(ts_iso_utc, used_percent, resets_at_epoch, plan)` samples.
+
+## Contributing
+
+Keep changes focused. Never commit `out/`, `.dispatch/`, real user paths, or private
+rollout data. Use synthetic or redacted examples. Before opening a PR, compile the scripts:
+
+```bash
+python3 -m py_compile scripts/collect.py scripts/brief.py scripts/fetch_prices.py scripts/render.py scripts/providers/__init__.py scripts/providers/codex.py
+```
 
 ## License
 
-Apache License 2.0 — Copyright 2026 Ligren, Inc. See `LICENSE` and `NOTICE`.
+[Apache License 2.0](LICENSE). Copyright 2026 Ligren, Inc. See [NOTICE](NOTICE).
