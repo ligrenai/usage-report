@@ -1,0 +1,9 @@
+# generated data and reports (contain local paths, account labels and usage figures)
+out/
+out-*/
+.dispatch/
+KEY-FIGURES.md
+*.png
+!examples/**
+__pycache__/
+*.pyc

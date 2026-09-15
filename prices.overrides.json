@@ -1,0 +1,45 @@
+{
+ "_note": "Fills prices the public pricing page does not publish (only used when prices.json has no value for that model/context; the fetched page always wins). Long-context (>272K) rates for these models come from the account billing dashboard, 2026-09-16. Delete a model here once the page publishes it.",
+ "long_context_threshold": 272000,
+ "models": {
+  "gpt-6-astra": {
+   "long": {
+    "input": 20,
+    "cached": 2,
+    "cache_write": 25,
+    "output": 75
+   }
+  },
+  "gpt-5.6-terra": {
+   "long": {
+    "input": 4,
+    "cached": 0.4,
+    "cache_write": 5,
+    "output": 18
+   }
+  },
+  "gpt-5.6-luna": {
+   "long": {
+    "input": 0.4,
+    "cached": 0.04,
+    "cache_write": 0.5,
+    "output": 1.8
+   }
+  },
+  "codex-auto-review": {
+   "_note": "not on the public pricing page; owner 2026-09-16: price at gpt-5.6-luna rates",
+   "short": {
+    "input": 0.2,
+    "cached": 0.02,
+    "cache_write": 0.25,
+    "output": 1.2
+   },
+   "long": {
+    "input": 0.4,
+    "cached": 0.04,
+    "cache_write": 0.5,
+    "output": 1.8
+   }
+  }
+ }
+}
