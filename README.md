@@ -88,6 +88,18 @@ Quota samples come from `rate_limits.primary` or `rate_limits.secondary` when
 are grouped per account by `resets_at`, rounded down to ten-minute boundaries.
 Daily quota consumption sums increases in each window's running maximum.
 
+Legacy `token_count` totals are cumulative snapshots. The first snapshot in a
+rollout can inherit a large baseline from a fork or resumed session, so it is
+not automatically counted as new usage; the collector uses its
+`last_token_usage` contribution when available and deltas thereafter. During
+the rollout format transition, a file may contain both `token_count` and
+`token_usage_record`; legacy events before the first usage record are retained,
+and overlapping legacy events after that point are ignored.
+Forked files that contain reliable `token_usage_record` events use those records
+alone, because Codex can replay the parent's historical `token_count` stream into
+the child file. Reliable records are also de-duplicated by `response_id` across
+rollout files because a fork can replay the same request with a new timestamp.
+
 ### Pricing
 
 - [scripts/fetch_prices.py](scripts/fetch_prices.py) extracts standard-tier tables
@@ -201,8 +213,8 @@ references. The skill describes the collection, reporting, and chart handoff wor
   are not counted because rollout files provide no counter.
 - Plan tier is recorded in JSON but hidden in the report because logged `plan_type`
   values were observed to disagree with the actual subscription tier.
-- Old rollouts use cumulative-total deltas; per-request attribution depends on the
-  information available in those logs.
+- Old rollouts use cumulative-total deltas with a fork-safe first snapshot;
+  per-request attribution depends on the information available in those logs.
 - `--account-from` filters token records and cycle starts, but currently does not
   filter daily/hourly quota samples. Quota percentages can therefore include earlier usage.
 - Daily quota percentages sum across accounts and resets, so they can exceed 100%.
