@@ -117,12 +117,14 @@ Standard and remain visible in the `unknown` breakdown.
 - [scripts/fetch_prices.py](scripts/fetch_prices.py) extracts standard-tier tables
   from the OpenAI pricing page and caches short/long-context rates in `prices.json`.
 - [prices.subscription.json](prices.subscription.json) stores the published
-  subscription credit rates and model-specific Fast multipliers. The official
-  subscription table maps to the current API Standard table at **25 credits per
-  $1 of API-equivalent value** for the published models (minor rounding exists in
-  some displayed credit rates). This is an analytical conversion, not the
-  subscription invoice price; plan agreements and credit purchase discounts are
-  separate.
+  subscription credit rates, model-specific Fast multipliers, and the API
+  reference rates used for credit comparison. The credit conversion uses
+  original/list API rates, not temporary API promotions: GPT-5.6 Sol uses the
+  historical `$5 / $0.50 / $25` input/cache/output rates supplied for this
+  report, so its ratio is **20 credits per $1**; the default for other published
+  models is **25 credits per $1** (minor rounding exists in some displayed
+  credit rates). This is an analytical conversion, not the subscription
+  invoice price or current promotional API spend.
 - The official Fast rules are model-specific: GPT-5.6/Astra and GPT-5.5 use
   2.5× subscription credits, while GPT-5.4 uses 2×. API Fast/Priority pricing is
   separate and is never mixed into the subscription credit calculation.
@@ -141,8 +143,9 @@ Standard and remain visible in the `unknown` breakdown.
   type by its long/short price ratio, so social-chart bars follow the pricing rule.
 - `credits_standard` prices all tokens at the published subscription Standard rate;
   `credits` applies the observed Fast multiplier; `credits_fast` isolates the
-  actual Fast/priority credit consumption; and `api_usd_from_credits` divides
-  credits by `meta.credits_per_api_usd`.
+  actual Fast/priority credit consumption; and `api_usd_from_credits` maps those
+  credits to the model-specific original/list API reference rates in
+  `meta.api_reference_prices`.
 
 To work offline, keep the cached prices or explicitly select the bundled snapshot:
 

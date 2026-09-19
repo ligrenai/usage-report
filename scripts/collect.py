@@ -62,6 +62,13 @@ def collect(args):
         return (i - c) / 1e6 * p.get('input', 0) + c / 1e6 * p.get('cached', 0) + o / 1e6 * p.get('output', 0)
     def fast_multiplier(model):
         return float(subscription_model(model).get('fast_multiplier', 1.0))
+    def api_reference_cost(model, i, c, o):
+        """Price subscription usage at original/list API rates, not promotions."""
+        p = subscription.get('_api_reference_prices', {}).get(model)
+        if not p:
+            current = price(model, 'short')
+            p = {field: current.get(field, 0) for field in ('input', 'cached', 'output')}
+        return (i - c) / 1e6 * p.get('input', 0) + c / 1e6 * p.get('cached', 0) + o / 1e6 * p.get('output', 0)
     def empty_metrics():
         return {'input': 0, 'cached': 0, 'output': 0, 'requests': 0, 'usd': 0.0, 'usd_standard': 0.0,
                 'credits_standard': 0.0, 'credits': 0.0, 'credits_fast': 0.0, 'api_usd_from_credits': 0.0,
@@ -75,7 +82,7 @@ def collect(args):
         target['usd'] += cost(model, cls, i, c, o); target['usd_standard'] += cost(model, 'short', i, c, o)
         target['credits_standard'] += base_credits; target['credits'] += consumed_credits
         target['credits_fast'] += consumed_credits if tier == 'fast' else 0.0
-        target['api_usd_from_credits'] += consumed_credits / subscription['_credits_per_api_usd']
+        target['api_usd_from_credits'] += api_reference_cost(model, i, c, o) * multiplier
         target[f'{tier}_requests'] += 1
         # Billable tokens: long-context tokens weighted by long/short price per token type.
         ps, pl = price(model, 'short'), price(model, cls)
@@ -188,7 +195,9 @@ def collect(args):
                     'long_context_threshold': TH, 'prices': prices['models'], 'prices_source': prices.get('_source'), 'prices_fetched_at': prices.get('_fetched_at'),
                     'prices_overrides': prices.get('_overrides'), 'prices_overrides_used': prices.get('_overrides_used'), 'complete_pct': args.complete_pct,
                     'subscription_prices': subscription['models'], 'subscription_prices_source': subscription.get('_source'), 'subscription_prices_fetched_at': subscription.get('_fetched_at'),
-                    'credits_per_api_usd': subscription['_credits_per_api_usd'], 'service_tier_counts': dict(tier_counts), 'service_tier_source_counts': dict(tier_source_counts),
+                    'credits_per_api_usd': subscription['_credits_per_api_usd'], 'api_equivalent_basis': subscription.get('_api_equivalent_basis', 'current_api_price'),
+                    'api_reference_prices': subscription.get('_api_reference_prices', {}), 'api_reference_note': subscription.get('_api_reference_note'),
+                    'service_tier_counts': dict(tier_counts), 'service_tier_source_counts': dict(tier_source_counts),
                     'notes': ['tokens come only from files on this machine; usage elsewhere is invisible',
                               'input includes cached; uncached = input - cached; output includes reasoning',
                               'cache writes are not counted (no counter in the source files)',
@@ -200,7 +209,7 @@ def collect(args):
                               'usd_standard = the same tokens priced at the standard (short-context) column, ignoring the long-context surcharge',
                               'credits_standard = published subscription credits at standard speed; credits = estimated subscription credits after the observed Fast multiplier',
                               'credits_fast = the estimated credits attributable to Fast/priority records; _service_tiers splits standard, fast, and unknown records',
-                              'api_usd_from_credits = credits divided by the published 25 credits per $1 API-equivalent ratio; this is an analytical conversion, not subscription money paid',
+                              'api_usd_from_credits = subscription credits mapped to the original/list API reference prices, with the observed Fast multiplier; this is analytical, not subscription money paid or current promotional API spend',
                               'service_tier is read directly when present, otherwise inferred from thread_settings_applied; unknown tiers are priced at standard speed',
                               'billable_* = tokens weighted by long price / short price per token type for [1m] buckets (weight 1 for short buckets); use these for token charts that should follow the pricing rule',
                               'plan = ChatGPT plan_type reported by the CLI for that account/cycle (pro, prolite, plus); quota sizes differ per plan']},

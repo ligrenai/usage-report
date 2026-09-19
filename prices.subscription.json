@@ -5,7 +5,19 @@
  "_unit": "ChatGPT/Codex credits per 1M tokens",
  "fallback_model": "gpt-5.6-sol",
  "_credits_per_api_usd": 25,
- "_conversion_note": "Analytical API-equivalent conversion from the published standard credit and API tables; not the user's subscription purchase price.",
+ "_api_equivalent_basis": "original_list_price",
+ "_conversion_note": "Analytical API-equivalent conversion from subscription credits to original/list API rates; not the user's subscription purchase price or current promotional API spend.",
+ "_api_reference_note": "GPT-5.6 Sol original/list rates are $5 input, $0.50 cached input, and $25 output per 1M tokens, supplied by the user; the current official page labels $4/$0.40/$20 as promotional. Other entries use their published Standard API rates.",
+ "_api_reference_prices": {
+  "gpt-6-astra": {"input": 10, "cached": 1, "output": 50},
+  "gpt-5.6-sol": {"input": 5, "cached": 0.5, "output": 25},
+  "gpt-5.6-terra": {"input": 2, "cached": 0.2, "output": 12},
+  "gpt-5.6-luna": {"input": 0.2, "cached": 0.02, "output": 1.2},
+  "gpt-5.5": {"input": 5, "cached": 0.5, "output": 30},
+  "gpt-5.4": {"input": 2.5, "cached": 0.25, "output": 15},
+  "gpt-5.4-mini": {"input": 0.75, "cached": 0.075, "output": 4.5},
+  "codex-auto-review": {"input": 0.2, "cached": 0.02, "output": 1.2}
+ },
  "_fast_note": "Fast/priority is the subscription credit multiplier. Historical priority settings are normalized to fast.",
  "models": {
   "gpt-6-astra": {"standard": {"input": 250, "cached": 25, "output": 1250}, "fast_multiplier": 2.5},
