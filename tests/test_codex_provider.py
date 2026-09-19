@@ -54,10 +54,15 @@ def settings(timestamp, service_tier):
     return event(timestamp, {'type': 'thread_settings_applied', 'thread_settings': {'service_tier': service_tier}})
 
 
-def session_meta(timestamp='2026-07-01T00:00:00Z', forked_from_id=None):
+def session_meta(timestamp='2026-07-01T00:00:00Z', forked_from_id=None,
+                 session_id=None, meta_id=None):
     payload = {'timestamp': timestamp}
     if forked_from_id:
         payload['forked_from_id'] = forked_from_id
+    if session_id:
+        payload['session_id'] = session_id
+    if meta_id:
+        payload['id'] = meta_id
     return event(timestamp, payload, 'session_meta')
 
 
@@ -205,6 +210,41 @@ class CodexProviderTests(unittest.TestCase):
             ('rollout-child.jsonl', child_rows),
         ])
         self.assertEqual([(r[3], r[4], r[5]) for r in records], [(100, 90, 5), (200, 180, 6)])
+
+    def test_forked_legacy_history_is_trimmed_but_child_suffix_is_kept(self):
+        parent_rows = [
+            session_meta(session_id='parent-session', meta_id='parent-session'),
+            turn('2026-07-01T00:00:00Z', 'gpt-5.6-sol'),
+            count('2026-07-01T00:00:01Z',
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5},
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5}),
+            count('2026-07-01T00:00:02Z',
+                  {'input_tokens': 150, 'cached_input_tokens': 140, 'output_tokens': 8},
+                  {'input_tokens': 50, 'cached_input_tokens': 50, 'output_tokens': 3}),
+        ]
+        child_rows = [
+            session_meta(forked_from_id='parent-session',
+                         session_id='parent-session', meta_id='child-session'),
+            turn('2026-07-01T00:01:00Z', 'gpt-5.6-sol'),
+            count('2026-07-01T00:01:01Z',
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5},
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5}),
+            count('2026-07-01T00:01:02Z',
+                  {'input_tokens': 150, 'cached_input_tokens': 140, 'output_tokens': 8},
+                  {'input_tokens': 50, 'cached_input_tokens': 50, 'output_tokens': 3}),
+            # Codex can append the copied parent metadata after the child metadata.
+            session_meta(session_id='parent-session', meta_id='parent-session'),
+            count('2026-07-01T00:01:03Z',
+                  {'input_tokens': 180, 'cached_input_tokens': 160, 'output_tokens': 10},
+                  {'input_tokens': 30, 'cached_input_tokens': 20, 'output_tokens': 2}),
+        ]
+        records = self.scan_files([
+            ('rollout-parent.jsonl', parent_rows),
+            ('rollout-child.jsonl', child_rows),
+        ])
+        self.assertEqual([(r[3], r[4], r[5]) for r in records], [
+            (100, 90, 5), (50, 50, 3), (30, 20, 2),
+        ])
 
     def test_stale_subagent_timestamp_uses_task_start_for_tokens_and_quota(self):
         outer = '2026-09-10T05:11:47Z'

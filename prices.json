@@ -1,6 +1,6 @@
 {
  "_source": "https://developers.openai.com/api/docs/pricing",
- "_fetched_at": "2026-09-18T18:49Z",
+ "_fetched_at": "2026-09-19T18:52Z",
  "_unit": "USD per 1M tokens; long = request input above long_context_threshold",
  "long_context_threshold": 272000,
  "fallback_model": "gpt-5.6-sol",

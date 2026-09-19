@@ -9,6 +9,9 @@ across rollout files because forked children can replay parent records with new 
 Records also carry the observed service tier (`standard`, `fast`, or `unknown`) and its
 source. Historical `priority` settings are normalized to `fast`; when the usage event
 does not carry a tier, the surrounding `thread_settings_applied` timeline is used.
+Legacy-only forked rollouts with a resolvable parent have their matching legacy prefix
+removed, preserving usage appended after the fork; unresolved sibling replays use an
+exact same-tier fallback.
 Quota: `token_count.rate_limits.primary|secondary` samples whose window is the weekly one (>= 10000 min).
 Some forked/subagent rollouts stamp every event with the file-creation time; those events
 are re-timed to `task_started.started_at` when the outer timestamp is stale.
@@ -111,12 +114,34 @@ def _effective_timestamp(timestamp, turn_start):
         return timestamp
     return _format_timestamp(turn_start)
 
+
+def _legacy_signature(event):
+    """Return the stable part of a legacy token delta for fork replay matching."""
+    return event[2:]
+
+
+def _replayed_legacy_prefix(child, parent):
+    """Count a child's legacy prefix copied from its declared parent.
+
+    Legacy token_count events have no response_id. Their token delta, model, and
+    pricing metadata remain stable across a fork even when timestamps are rewritten.
+    Remove only the matching prefix so a child suffix remains billable.
+    """
+    shared = min(len(child), len(parent))
+    for index in range(shared):
+        if _legacy_signature(child[index]) != _legacy_signature(parent[index]):
+            return index
+    return shared
+
 def scan(homes):
     recs = []; series = {}; seen_usage_ids = set(); seen_legacy_segments = set()
     for acc, home in homes.items():
         series.setdefault(acc, [])
+        parsed_files = []
+        session_index = {}
         for f in sorted(glob.glob(os.path.join(home, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))):
-            model = '?'; first_model = '?'; prev = None; session_meta = {}
+            model = '?'; first_model = '?'; prev = None
+            session_ids = set(); primary_session_id = None; forked_from_id = None
             active_tier = None
             legacy = []; legacy_by_tier = defaultdict(list); usage_records = []
             rows = []
@@ -139,7 +164,15 @@ def scan(homes):
             for j in rows:
                 typ = j.get('type'); p = j.get('payload') or {}
                 if typ == 'session_meta':
-                    session_meta = p
+                    # A forked file can append copied parent metadata after its own
+                    # metadata. Preserve the first fork marker and child id.
+                    if primary_session_id is None:
+                        primary_session_id = p.get('id') or p.get('session_id')
+                    for key in ('id', 'session_id'):
+                        if p.get(key):
+                            session_ids.add(p[key])
+                    if forked_from_id is None and p.get('forked_from_id'):
+                        forked_from_id = p['forked_from_id']
                     continue
                 if typ == 'event_msg' and p.get('type') == 'task_started':
                     active_turn = p.get('turn_id') or active_turn
@@ -208,23 +241,23 @@ def scan(homes):
                     usage_records.append((timestamp, acc, model, input_tokens, cached_input_tokens, output_tokens, input_tokens, tier, source))
             legacy = _fill_unknown_model(legacy, first_model)
             usage_records = _fill_unknown_model(usage_records, first_model)
-            # Forks created before reliable usage records can contain identical
-            # legacy Fast/standard segments in sibling rollout files. Remove only
-            # exact same-tier delta sequences from siblings sharing a parent id;
-            # unrelated sessions and divergent branches remain untouched.
-            fork_parent = session_meta.get('forked_from_id')
-            if fork_parent and not usage_records:
-                kept = []
-                for tier, events in legacy_by_tier.items():
-                    signature = tuple(event[3:6] for event in events)
-                    marker = (acc, fork_parent, tier, signature)
-                    if not signature or marker in seen_legacy_segments:
-                        continue
-                    seen_legacy_segments.add(marker)
-                    kept.extend(_fill_unknown_model(events, first_model))
-                legacy = kept
+            parsed = {
+                'legacy': legacy,
+                'legacy_by_tier': legacy_by_tier,
+                'first_model': first_model,
+                'usage_records': usage_records,
+                'primary_session_id': primary_session_id,
+                'forked_from_id': forked_from_id,
+            }
+            parsed_files.append(parsed)
+            for session_id in session_ids:
+                session_index.setdefault(session_id, []).append(parsed)
+
+        for parsed in parsed_files:
+            legacy = parsed['legacy']
+            usage_records = parsed['usage_records']
             if usage_records:
-                if session_meta.get('forked_from_id'):
+                if parsed['forked_from_id']:
                     # Fork logs can replay the parent's historical token_count stream before
                     # emitting reliable per-request records. The parent log already owns that
                     # history; counting it here would charge the same work again.
@@ -236,6 +269,34 @@ def scan(homes):
                     recs.extend(event for event in legacy if event[0] < first_record_ts)
                     recs.extend(usage_records)
             else:
+                parent_id = parsed['forked_from_id']
+                if parent_id:
+                    candidates = [
+                        candidate for candidate in session_index.get(parent_id, [])
+                        if candidate is not parsed
+                    ]
+                    parent = next(
+                        (candidate for candidate in candidates
+                         if candidate['primary_session_id'] == parent_id),
+                        candidates[0] if len(candidates) == 1 else None,
+                    )
+                    if parent:
+                        # Legacy events have no stable request id. Match the replayed
+                        # parent prefix by delta/model/tier and retain the child suffix.
+                        legacy = legacy[_replayed_legacy_prefix(legacy, parent['legacy']):]
+                    else:
+                        # Some older files expose fork_from_id but no session id. Keep
+                        # the existing sibling fallback for identical same-tier streams.
+                        kept = []
+                        for tier, events in parsed['legacy_by_tier'].items():
+                            events = _fill_unknown_model(events, parsed['first_model'])
+                            signature = tuple(event[3:6] for event in events)
+                            marker = (acc, parent_id, tier, signature)
+                            if not signature or marker in seen_legacy_segments:
+                                continue
+                            seen_legacy_segments.add(marker)
+                            kept.extend(events)
+                        legacy = kept
                 recs.extend(legacy)
     recs.sort()
     return recs, series
