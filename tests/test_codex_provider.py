@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from scripts.providers.codex import scan
@@ -14,13 +15,25 @@ def turn(timestamp, model):
     return event(timestamp, {'model': model}, 'turn_context')
 
 
-def count(timestamp, total, last, model=None):
+def task_started(timestamp, turn_id, started_at):
+    started = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+    payload = {
+        'type': 'task_started',
+        'turn_id': turn_id,
+        'started_at': int(started.timestamp()),
+    }
+    return event(timestamp, payload)
+
+
+def count(timestamp, total, last, model=None, rate_limits=None):
     payload = {
         'type': 'token_count',
         'info': {'total_token_usage': total, 'last_token_usage': last},
     }
     if model:
         payload['model'] = model
+    if rate_limits:
+        payload['rate_limits'] = rate_limits
     return event(timestamp, payload)
 
 
@@ -61,6 +74,11 @@ class CodexProviderTests(unittest.TestCase):
                 write_rollout(temp, name, rows)
             records, _ = scan({'test': temp})
             return records
+
+    def scan_rows_with_series(self, rows):
+        with tempfile.TemporaryDirectory() as temp:
+            write_rollout(temp, 'rollout-test.jsonl', rows)
+            return scan({'test': temp})
 
     def test_first_legacy_snapshot_does_not_recount_fork_baseline(self):
         rows = [
@@ -146,6 +164,28 @@ class CodexProviderTests(unittest.TestCase):
             ('rollout-child.jsonl', child_rows),
         ])
         self.assertEqual([(r[3], r[4], r[5]) for r in records], [(100, 90, 5), (200, 180, 6)])
+
+    def test_stale_subagent_timestamp_uses_task_start_for_tokens_and_quota(self):
+        outer = '2026-09-10T05:11:47Z'
+        started = '2026-09-11T01:42:26Z'
+        rate_limits = {
+            'primary': {
+                'used_percent': 73,
+                'window_minutes': 10080,
+                'resets_at': 1789594394,
+            },
+        }
+        records, series = self.scan_rows_with_series([
+            task_started(outer, 'turn-1', started),
+            event(outer, {'turn_id': 'turn-1', 'model': 'gpt-5.6-luna'}, 'turn_context'),
+            record(outer, 100, 90, 5),
+            count(outer,
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5},
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5},
+                  rate_limits=rate_limits),
+        ])
+        self.assertEqual(records[0][0], started)
+        self.assertEqual(series['test'][0][0], started)
 
 
 if __name__ == '__main__':

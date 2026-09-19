@@ -7,7 +7,10 @@ legacy events before the first usage record are retained, and overlapping legacy
 after that transition are ignored. Reliable records are de-duplicated by `response_id`
 across rollout files because forked children can replay parent records with new timestamps.
 Quota: `token_count.rate_limits.primary|secondary` samples whose window is the weekly one (>= 10000 min).
+Some forked/subagent rollouts stamp every event with the file-creation time; those events
+are re-timed to `task_started.started_at` when the outer timestamp is stale.
 """
+import datetime
 import glob, json, os
 
 NAME = 'codex'
@@ -45,6 +48,40 @@ def _fill_unknown_model(events, model):
     if not model or model == '?': return events
     return [event[:2] + (model,) + event[3:] if event[2] == '?' else event for event in events]
 
+
+def _parse_timestamp(value):
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return datetime.datetime.fromtimestamp(float(value), datetime.timezone.utc)
+        text = str(value).replace('Z', '+00:00')
+        parsed = datetime.datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return parsed.astimezone(datetime.timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _format_timestamp(value):
+    return value.isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+
+def _effective_timestamp(timestamp, turn_start):
+    """Repair rollout timestamps copied from the file-creation time.
+
+    Some forked/subagent rollouts give every JSONL event the same outer
+    timestamp. When that timestamp is materially away from the turn's own
+    ``started_at``, use the turn start for attribution and quota ordering.
+    """
+    if not turn_start:
+        return timestamp
+    event_time = _parse_timestamp(timestamp)
+    if event_time is None or abs((event_time - turn_start).total_seconds()) <= 3600:
+        return timestamp
+    return _format_timestamp(turn_start)
+
 def scan(homes):
     recs = []; series = {}; seen_usage_ids = set()
     for acc, home in homes.items():
@@ -52,59 +89,81 @@ def scan(homes):
         for f in sorted(glob.glob(os.path.join(home, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))):
             model = '?'; first_model = '?'; prev = None; session_meta = {}
             legacy = []; usage_records = []
+            rows = []
             with open(f, 'rb') as fh:
                 for raw_line in fh:
                     try: j = json.loads(raw_line)
                     except Exception: continue
-                    typ = j.get('type'); p = j.get('payload') or {}
-                    if typ == 'session_meta':
-                        session_meta = p
-                        continue
-                    if typ == 'turn_context':
-                        candidate = p.get('model') or '?'
-                        if candidate != '?':
-                            if first_model == '?': first_model = candidate
-                            model = candidate
-                        continue
-                    if typ == 'event_msg' and p.get('type') == 'token_count':
-                        for k in ('primary', 'secondary'):
-                            rl = (p.get('rate_limits') or {}).get(k)
-                            if rl and rl.get('used_percent') is not None and (rl.get('window_minutes') or 0) >= 10000 and rl.get('resets_at'):
-                                series[acc].append((j['timestamp'], float(rl['used_percent']), int(rl['resets_at']), (p.get('rate_limits') or {}).get('plan_type') or '?'))
-                        info = p.get('info') or {}; total = info.get('total_token_usage')
-                        if not total: continue
-                        cur = _usage_tuple(total)
-                        last = info.get('last_token_usage')
-                        last_present = _has_usage_fields(last)
-                        last_usage = _usage_tuple(last)
-                        if prev is None:
-                            # A forked/resumed rollout often starts with an inherited total.
-                            # The first event's last usage is the only new work we can attribute.
-                            delta = last_usage if last_present else cur
-                        elif any(cur[i] < prev[i] for i in range(3)):
-                            # A reset starts a new cumulative segment; do not emit a negative delta.
-                            delta = last_usage if last_present else cur
-                        else:
-                            delta = tuple(cur[i] - prev[i] for i in range(3))
-                        prev = cur
-                        i, c, o = delta
-                        if i > 0 or o > 0:
-                            size = int(last_usage[0] or i) if last_present else i
-                            legacy.append((j['timestamp'], acc, model, i, c, o, size))
-                        continue
-                    if typ == 'token_usage_record':
-                        response_id = p.get('response_id')
-                        if response_id:
-                            # A forked child can replay the parent's reliable usage records
-                            # with a new timestamp. response_id is the stable request identity.
-                            if response_id in seen_usage_ids:
-                                continue
-                            seen_usage_ids.add(response_id)
-                        u = p.get('usage') or {}
-                        input_tokens = int(u.get('input_tokens') or 0)
-                        cached_input_tokens = int(u.get('cached_input_tokens') or 0)
-                        output_tokens = int(u.get('output_tokens') or 0)
-                        usage_records.append((j['timestamp'], acc, model, input_tokens, cached_input_tokens, output_tokens, input_tokens))
+                    rows.append(j)
+
+            turn_starts = {}
+            for j in rows:
+                p = j.get('payload') or {}
+                if j.get('type') == 'event_msg' and p.get('type') == 'task_started':
+                    turn_id = p.get('turn_id')
+                    started_at = _parse_timestamp(p.get('started_at'))
+                    if turn_id and started_at:
+                        turn_starts[turn_id] = started_at
+
+            active_turn = None
+            for j in rows:
+                typ = j.get('type'); p = j.get('payload') or {}
+                if typ == 'session_meta':
+                    session_meta = p
+                    continue
+                if typ == 'event_msg' and p.get('type') == 'task_started':
+                    active_turn = p.get('turn_id') or active_turn
+                    continue
+                if typ == 'turn_context':
+                    candidate = p.get('model') or '?'
+                    if candidate != '?':
+                        if first_model == '?': first_model = candidate
+                        model = candidate
+                    continue
+                turn_id = p.get('turn_id') or active_turn
+                turn_start = turn_starts.get(turn_id)
+                if not turn_start and len(turn_starts) == 1:
+                    turn_start = next(iter(turn_starts.values()))
+                timestamp = _effective_timestamp(j.get('timestamp'), turn_start)
+                if typ == 'event_msg' and p.get('type') == 'token_count':
+                    for k in ('primary', 'secondary'):
+                        rl = (p.get('rate_limits') or {}).get(k)
+                        if rl and rl.get('used_percent') is not None and (rl.get('window_minutes') or 0) >= 10000 and rl.get('resets_at'):
+                            series[acc].append((timestamp, float(rl['used_percent']), int(rl['resets_at']), (p.get('rate_limits') or {}).get('plan_type') or '?'))
+                    info = p.get('info') or {}; total = info.get('total_token_usage')
+                    if not total: continue
+                    cur = _usage_tuple(total)
+                    last = info.get('last_token_usage')
+                    last_present = _has_usage_fields(last)
+                    last_usage = _usage_tuple(last)
+                    if prev is None:
+                        # A forked/resumed rollout often starts with an inherited total.
+                        # The first event's last usage is the only new work we can attribute.
+                        delta = last_usage if last_present else cur
+                    elif any(cur[i] < prev[i] for i in range(3)):
+                        # A reset starts a new cumulative segment; do not emit a negative delta.
+                        delta = last_usage if last_present else cur
+                    else:
+                        delta = tuple(cur[i] - prev[i] for i in range(3))
+                    prev = cur
+                    i, c, o = delta
+                    if i > 0 or o > 0:
+                        size = int(last_usage[0] or i) if last_present else i
+                        legacy.append((timestamp, acc, model, i, c, o, size))
+                    continue
+                if typ == 'token_usage_record':
+                    response_id = p.get('response_id')
+                    if response_id:
+                        # A forked child can replay the parent's reliable usage records
+                        # with a new timestamp. response_id is the stable request identity.
+                        if response_id in seen_usage_ids:
+                            continue
+                        seen_usage_ids.add(response_id)
+                    u = p.get('usage') or {}
+                    input_tokens = int(u.get('input_tokens') or 0)
+                    cached_input_tokens = int(u.get('cached_input_tokens') or 0)
+                    output_tokens = int(u.get('output_tokens') or 0)
+                    usage_records.append((timestamp, acc, model, input_tokens, cached_input_tokens, output_tokens, input_tokens))
             legacy = _fill_unknown_model(legacy, first_model)
             usage_records = _fill_unknown_model(usage_records, first_model)
             if usage_records:
