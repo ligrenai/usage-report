@@ -100,14 +100,14 @@ def _format_timestamp(value):
     return value.isoformat(timespec='seconds').replace('+00:00', 'Z')
 
 
-def _effective_timestamp(timestamp, turn_start):
+def _effective_timestamp(timestamp, turn_start, allow_retime=True):
     """Repair rollout timestamps copied from the file-creation time.
 
     Some forked/subagent rollouts give every JSONL event the same outer
     timestamp. When that timestamp is materially away from the turn's own
     ``started_at``, use the turn start for attribution and quota ordering.
     """
-    if not turn_start:
+    if not allow_retime or not turn_start:
         return timestamp
     event_time = _parse_timestamp(timestamp)
     if event_time is None or abs((event_time - turn_start).total_seconds()) <= 3600:
@@ -117,21 +117,36 @@ def _effective_timestamp(timestamp, turn_start):
 
 def _legacy_signature(event):
     """Return the stable part of a legacy token delta for fork replay matching."""
-    return event[2:]
+    # Timestamp, account, tier, and tier source can all change in a copied
+    # rollout. Model, deltas, and request-size metadata identify the replay.
+    return event[2:7]
 
 
 def _replayed_legacy_prefix(child, parent):
-    """Count a child's legacy prefix copied from its declared parent.
+    """Count a child's copied legacy slice from its declared parent.
 
     Legacy token_count events have no response_id. Their token delta, model, and
     pricing metadata remain stable across a fork even when timestamps are rewritten.
-    Remove only the matching prefix so a child suffix remains billable.
+    A fork may start at a later parent event instead of event zero. Remove
+    only the longest matching child prefix so a child suffix remains billable.
     """
-    shared = min(len(child), len(parent))
-    for index in range(shared):
-        if _legacy_signature(child[index]) != _legacy_signature(parent[index]):
-            return index
-    return shared
+    if not child or not parent:
+        return 0
+    positions = defaultdict(list)
+    for index, event in enumerate(parent):
+        positions[_legacy_signature(event)].append(index)
+    best = 0
+    for parent_start in positions.get(_legacy_signature(child[0]), []):
+        limit = min(len(child), len(parent) - parent_start)
+        if limit <= best:
+            continue
+        matched = 0
+        while matched < limit and _legacy_signature(child[matched]) == _legacy_signature(parent[parent_start + matched]):
+            matched += 1
+        best = max(best, matched)
+    # A one-event coincidence is not enough evidence to remove a branch's
+    # first request. Real copied histories contain a contiguous run.
+    return best if best >= 2 else 0
 
 def scan(homes):
     recs = []; series = {}; seen_usage_ids = set(); seen_legacy_segments = set()
@@ -159,6 +174,25 @@ def scan(homes):
                     started_at = _parse_timestamp(p.get('started_at'))
                     if turn_id and started_at:
                         turn_starts[turn_id] = started_at
+
+            # A normal long-lived session can contain many turns whose legacy
+            # token_count events have no turn_id. Its outer timestamps are the
+            # only usable event timeline and must stay intact. Forked or
+            # single-turn files retain the stale-timestamp repair for copied
+            # rollout events and the existing regression case.
+            declared_fork = next(
+                (p.get('forked_from_id') for j in rows
+                 if j.get('type') == 'session_meta'
+                 for p in [j.get('payload') or {}]
+                 if p.get('forked_from_id')),
+                None,
+            )
+            allow_retime = bool(declared_fork) or len(turn_starts) == 1
+            # A fork copies the parent's quota observations along with its
+            # legacy stream. Keep those rate-limit samples on their outer
+            # event timeline; moving them to an inherited task start can move
+            # the weekly reset days earlier and create a false cycle boundary.
+            allow_retime_rate = len(turn_starts) == 1 and not declared_fork
 
             active_turn = None
             for j in rows:
@@ -193,12 +227,15 @@ def scan(homes):
                 turn_start = turn_starts.get(turn_id)
                 if not turn_start and len(turn_starts) == 1:
                     turn_start = next(iter(turn_starts.values()))
-                timestamp = _effective_timestamp(j.get('timestamp'), turn_start)
+                timestamp = _effective_timestamp(j.get('timestamp'), turn_start, allow_retime)
                 if typ == 'event_msg' and p.get('type') == 'token_count':
+                    rate_timestamp = _effective_timestamp(
+                        j.get('timestamp'), turn_start, allow_retime_rate,
+                    )
                     for k in ('primary', 'secondary'):
                         rl = (p.get('rate_limits') or {}).get(k)
                         if rl and rl.get('used_percent') is not None and (rl.get('window_minutes') or 0) >= 10000 and rl.get('resets_at'):
-                            series[acc].append((timestamp, float(rl['used_percent']), int(rl['resets_at']), (p.get('rate_limits') or {}).get('plan_type') or '?'))
+                            series[acc].append((rate_timestamp, float(rl['used_percent']), int(rl['resets_at']), (p.get('rate_limits') or {}).get('plan_type') or '?'))
                     info = p.get('info') or {}; total = info.get('total_token_usage')
                     if not total: continue
                     cur = _usage_tuple(total)
@@ -281,8 +318,9 @@ def scan(homes):
                         candidates[0] if len(candidates) == 1 else None,
                     )
                     if parent:
-                        # Legacy events have no stable request id. Match the replayed
-                        # parent prefix by delta/model/tier and retain the child suffix.
+                        # Legacy events have no stable request id. Match a copied
+                        # parent slice by delta/model/request size and retain the
+                        # child suffix.
                         legacy = legacy[_replayed_legacy_prefix(legacy, parent['legacy']):]
                     else:
                         # Some older files expose fork_from_id but no session id. Keep

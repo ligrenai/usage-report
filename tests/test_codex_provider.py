@@ -246,6 +246,86 @@ class CodexProviderTests(unittest.TestCase):
             (100, 90, 5), (50, 50, 3), (30, 20, 2),
         ])
 
+    def test_forked_legacy_slice_from_parent_middle_is_trimmed(self):
+        parent_rows = [
+            session_meta(session_id='parent-session', meta_id='parent-session'),
+            turn('2026-07-01T00:00:00Z', 'gpt-5.6-sol'),
+            count('2026-07-01T00:00:01Z',
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5},
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5}),
+            count('2026-07-01T00:00:02Z',
+                  {'input_tokens': 150, 'cached_input_tokens': 140, 'output_tokens': 8},
+                  {'input_tokens': 50, 'cached_input_tokens': 50, 'output_tokens': 3}),
+            count('2026-07-01T00:00:03Z',
+                  {'input_tokens': 210, 'cached_input_tokens': 195, 'output_tokens': 12},
+                  {'input_tokens': 60, 'cached_input_tokens': 55, 'output_tokens': 4}),
+        ]
+        child_rows = [
+            session_meta(forked_from_id='parent-session',
+                         session_id='parent-session', meta_id='child-session'),
+            turn('2026-07-01T00:01:00Z', 'gpt-5.6-sol'),
+            # The fork starts at the parent's second legacy event.
+            count('2026-07-01T00:01:01Z',
+                  {'input_tokens': 150, 'cached_input_tokens': 140, 'output_tokens': 8},
+                  {'input_tokens': 50, 'cached_input_tokens': 50, 'output_tokens': 3}),
+            count('2026-07-01T00:01:02Z',
+                  {'input_tokens': 210, 'cached_input_tokens': 195, 'output_tokens': 12},
+                  {'input_tokens': 60, 'cached_input_tokens': 55, 'output_tokens': 4}),
+            count('2026-07-01T00:01:03Z',
+                  {'input_tokens': 240, 'cached_input_tokens': 220, 'output_tokens': 15},
+                  {'input_tokens': 30, 'cached_input_tokens': 25, 'output_tokens': 3}),
+        ]
+        records = self.scan_files([
+            ('rollout-parent.jsonl', parent_rows),
+            ('rollout-child.jsonl', child_rows),
+        ])
+        self.assertEqual([(r[3], r[4], r[5]) for r in records], [
+            (100, 90, 5), (50, 50, 3), (60, 55, 4), (30, 25, 3),
+        ])
+
+    def test_multi_turn_legacy_session_keeps_outer_event_timestamps(self):
+        rate_limits = {
+            'primary': {
+                'used_percent': 42,
+                'window_minutes': 10080,
+                'resets_at': 1789594394,
+            },
+        }
+        records, series = self.scan_rows_with_series([
+            task_started('2026-07-01T00:00:00Z', 'turn-1', '2026-07-01T00:00:00Z'),
+            count('2026-07-01T00:00:01Z',
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5},
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5}),
+            task_started('2026-07-01T01:00:00Z', 'turn-2', '2026-07-01T01:00:00Z'),
+            count('2026-07-02T04:00:00Z',
+                  {'input_tokens': 180, 'cached_input_tokens': 160, 'output_tokens': 8},
+                  {'input_tokens': 80, 'cached_input_tokens': 70, 'output_tokens': 3},
+                  rate_limits=rate_limits),
+        ])
+        self.assertEqual(records[-1][0], '2026-07-02T04:00:00Z')
+        self.assertEqual(series['test'][0][0], '2026-07-02T04:00:00Z')
+
+    def test_forked_quota_sample_keeps_outer_timestamp(self):
+        outer = '2026-07-02T04:00:00Z'
+        started = '2026-07-01T00:00:00Z'
+        rate_limits = {
+            'primary': {
+                'used_percent': 0,
+                'window_minutes': 10080,
+                'resets_at': 1789594394,
+            },
+        }
+        records, series = self.scan_rows_with_series([
+            session_meta(forked_from_id='parent-session'),
+            task_started(outer, 'turn-1', started),
+            count(outer,
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5},
+                  {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5},
+                  rate_limits=rate_limits),
+        ])
+        self.assertEqual(records[0][0], started)
+        self.assertEqual(series['test'][0][0], outer)
+
     def test_stale_subagent_timestamp_uses_task_start_for_tokens_and_quota(self):
         outer = '2026-09-10T05:11:47Z'
         started = '2026-09-11T01:42:26Z'
