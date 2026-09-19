@@ -117,14 +117,13 @@ Standard and remain visible in the `unknown` breakdown.
 - [scripts/fetch_prices.py](scripts/fetch_prices.py) extracts standard-tier tables
   from the OpenAI pricing page and caches short/long-context rates in `prices.json`.
 - [prices.subscription.json](prices.subscription.json) stores the published
-  subscription credit rates, model-specific Fast multipliers, and the API
-  reference rates used for credit comparison. The credit conversion uses
-  original/list API rates, not temporary API promotions: GPT-5.6 Sol uses the
-  historical `$5 / $0.50 / $25` input/cache/output rates supplied for this
-  report, so its ratio is **20 credits per $1**; the default for other published
-  models is **25 credits per $1** (minor rounding exists in some displayed
-  credit rates). This is an analytical conversion, not the subscription
-  invoice price or current promotional API spend.
+  subscription credit rates, model-specific Fast multipliers, and the current
+  API Standard reference rates used for credit comparison. The credit
+  conversion currently uses the published/promotional Sol rates of
+  `$4 / $0.40 / $20`, so it displays approximately **25 credits per $1** for
+  Sol, matching the other published models. OpenAI does not document this as
+  an official credit-to-API billing rule; it is an approximate comparison and
+  may change when the promotion changes.
 - The official Fast rules are model-specific: GPT-5.6/Astra and GPT-5.5 use
   2.5× subscription credits, while GPT-5.4 uses 2×. API Fast/Priority pricing is
   separate and is never mixed into the subscription credit calculation.
@@ -144,7 +143,7 @@ Standard and remain visible in the `unknown` breakdown.
 - `credits_standard` prices all tokens at the published subscription Standard rate;
   `credits` applies the observed Fast multiplier; `credits_fast` isolates the
   actual Fast/priority credit consumption; and `api_usd_from_credits` maps those
-  credits to the model-specific original/list API reference rates in
+  credits to the model-specific current API Standard reference rates in
   `meta.api_reference_prices`.
 
 To work offline, keep the cached prices or explicitly select the bundled snapshot:

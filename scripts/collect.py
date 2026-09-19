@@ -63,7 +63,7 @@ def collect(args):
     def fast_multiplier(model):
         return float(subscription_model(model).get('fast_multiplier', 1.0))
     def api_reference_cost(model, i, c, o):
-        """Price subscription usage at original/list API rates, not promotions."""
+        """Price subscription usage at the current API Standard reference rates."""
         p = subscription.get('_api_reference_prices', {}).get(model)
         if not p:
             current = price(model, 'short')
@@ -209,7 +209,7 @@ def collect(args):
                               'usd_standard = the same tokens priced at the standard (short-context) column, ignoring the long-context surcharge',
                               'credits_standard = published subscription credits at standard speed; credits = estimated subscription credits after the observed Fast multiplier',
                               'credits_fast = the estimated credits attributable to Fast/priority records; _service_tiers splits standard, fast, and unknown records',
-                              'api_usd_from_credits = subscription credits mapped to the original/list API reference prices, with the observed Fast multiplier; this is analytical, not subscription money paid or current promotional API spend',
+                              'api_usd_from_credits = subscription credits mapped to the current API Standard reference prices, with the observed subscription Fast multiplier; this is approximate, not an official subscription billing rule or subscription money paid',
                               'service_tier is read directly when present, otherwise inferred from thread_settings_applied; unknown tiers are priced at standard speed',
                               'billable_* = tokens weighted by long price / short price per token type for [1m] buckets (weight 1 for short buckets); use these for token charts that should follow the pricing rule',
                               'plan = ChatGPT plan_type reported by the CLI for that account/cycle (pro, prolite, plus); quota sizes differ per plan']},

@@ -222,7 +222,7 @@ JAVASCRIPT = r"""
     const standard = data.meta.subscription_prices?.['gpt-5.6-sol']?.standard;
     const reference = data.meta.api_reference_prices?.['gpt-5.6-sol'];
     const solRatio = standard?.input && reference?.input ? standard.input / reference.input : fallback;
-    const basis = data.meta.api_equivalent_basis === 'original_list_price' ? 'original/list API rates' : 'API rates';
+    const basis = data.meta.api_equivalent_basis === 'current_api_standard_price' ? 'current API Standard rates' : 'API rates';
     return basis + '; Sol ' + number(solRatio) + ' credits per $1; default ' + number(fallback) + ' credits per $1';
   };
   const pct = value => value == null ? '—' : number(value) + '%';
@@ -448,14 +448,14 @@ JAVASCRIPT = r"""
     const cards2 = [
       ['Subscription credits consumed', number(credits) + ' credits', 'Estimated with observed Standard/Fast tier; standard baseline ' + number(standardCredits)],
       ['Fast / priority credits', number(fastCredits) + ' credits', 'Fast portion of consumed credits · ' + (credits ? number(fastCredits / credits * 100) : '0') + '%'],
-      ['Original/list API equivalent from credits', money(creditUsd) + ' USD', creditApiNote(data)]
+      ['Current API equivalent from credits', money(creditUsd) + ' USD', creditApiNote(data)]
     ].map(([label, amount, note]) => {
       const card = el('article', {class: 'metric billing-metric'});
       card.append(el('h3', {}, label), el('div', {class: 'amount'}, amount), el('p', {class: 'micro'}, note));
       return card;
     });
     replace('billing-metrics', ...cards2);
-    $('billing-note').textContent = 'Credits are subscription consumption estimates; the API USD above uses current applied rates, while this conversion uses original/list API rates. Unknown-tier records are priced at Standard speed.';
+    $('billing-note').textContent = 'Credits are subscription consumption estimates; this conversion uses current API Standard rates as an approximate reference, not an official subscription billing rule. Unknown-tier records are priced at Standard speed.';
   }
 
   function renderTabs() {
@@ -899,7 +899,7 @@ JAVASCRIPT = r"""
     const table = el('table'), head = el('thead'), header = el('tr'), body = el('tbody');
     table.append(el('caption', {}, 'API USD and subscription credits / 1M tokens · model keys present in the data'));
     ['Model key', 'Input (standard)', 'Cached input (standard)', 'Output (standard)',
-      'Long applied · input / cached / output', 'Original/list API · input / cached / output',
+      'Long applied · input / cached / output', 'Current API Standard · input / cached / output',
       'Subscription credits · input / cached / output', 'Fast multiplier', 'Notes'].forEach(label => header.append(th(label)));
     head.append(header);
     // Pricing needs more precision than usage labels (for example $0.02 cached input).
@@ -919,7 +919,7 @@ JAVASCRIPT = r"""
       body.append(row);
     }
     table.append(head, body); replace('price-table', wrapTable(table, 'API prices'));
-    $('price-note').textContent = 'API USD uses the current applied context column; the original/list API column is used only for the credit-equivalent comparison. Subscription credits use the published standard credit table and observed Fast multiplier. Long-context subscription credits use the same published model rate because the subscription table does not publish a separate long column.';
+    $('price-note').textContent = 'API USD uses the current applied context column; the current API Standard column is used as an approximate reference for credit comparison. Subscription credits use the published standard credit table and observed Fast multiplier. Long-context subscription credits use the same published model rate because the subscription table does not publish a separate long column.';
   }
   function renderCaveats() {
     const meta = data.meta, list = el('ul');
@@ -932,7 +932,7 @@ JAVASCRIPT = r"""
       '[1m] means request input >' + threshold + ' tokens, priced at long-context rates; each model key is counted separately.',
       'Input includes cached tokens; output includes reasoning. Cache writes are not recorded or counted. USD is API-equivalent value, not money paid.',
       'Subscription credits are separate from API billing: standard credits follow the published Codex table, Fast/priority uses the model multiplier, and unknown tiers are conservatively priced at Standard.',
-      'The credits → API USD figure is an analytical conversion using ' + (meta.api_equivalent_basis === 'original_list_price' ? 'original/list API rates (Sol: 20 credits per $1; default: ' + number(meta.credits_per_api_usd || 25) + ')' : number(meta.credits_per_api_usd || 25) + ' credits per $1') + '; it does not claim that the subscription charge equals API spend or current promotional API spend.',
+      'The credits → API USD figure is an approximate comparison using current API Standard rates (Sol currently maps to about 25 credits per $1); it is not an official subscription billing rule and may change when the promotion changes.',
       'Observed service tiers: ' + Object.entries(meta.service_tier_counts || {}).map(([tier, count]) => tier + ' ' + number(count) + ' requests').join(' · ') + '. Tier source: direct event where available, otherwise settings timeline.',
       'Complete cycles reach peak ≥' + number(meta.complete_pct ?? 95) + '%; observation need not start at 0%. Cycles retain their full observed intervals, which may extend beyond the date range. Medians use raw cycle USD, including mixed usage, without extrapolation.',
       'Daily quota % means percentage points consumed. Percentage points are summed across accounts; resets can push consumption above 100%. A dash means missing data, not zero. The first and last local day may be partial because the source range is UTC days. Hourly buckets are assigned by their local start; zones with fractional-hour offsets have hour-level boundary precision.',
