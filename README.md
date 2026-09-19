@@ -1,11 +1,13 @@
 # usage-report
 
-Local Codex CLI usage, valued at OpenAI API prices.
+Local Codex CLI usage, shown in OpenAI API value and ChatGPT/Codex subscription credits.
 
 Price usage from local rollout files, rebuild weekly quota cycles per account,
 render a self-contained HTML report, and write a data brief for a social-post chart.
 Usage collection reads only files already on disk: no provider API calls, CLI
-invocations, or quota polling. The price fetcher downloads the public pricing page.
+invocations, or quota polling. The API price fetcher downloads the public pricing
+page; the bundled subscription snapshot records the published credit table and
+Fast multipliers.
 **USD means API-equivalent value, not money paid.**
 
 **Python 3.9+ · Standard library only · [Apache-2.0](LICENSE)**
@@ -70,6 +72,7 @@ can still contain a local path. Review the JSON and embedded report data before 
 | `collect.py` | `--account-from` | Set an account's start date with `LABEL=YYYY-MM-DD`; see limitations below. |
 | `collect.py` | `--tz` | Set the daily bucket UTC offset; default: 0. |
 | `collect.py` | `--prices`, `--out`, `--redact-homes` | Select price JSON, output directory, and home-path redaction. |
+| `collect.py` | `--subscription-prices` | Select the ChatGPT/Codex credit and Fast multiplier snapshot; defaults to `prices.subscription.json`. |
 | `collect.py` | `--complete-pct`, `--min-samples`, `--min-tokens` | Cycle thresholds; defaults: 95%, 20 samples, 20 million input tokens. |
 | `fetch_prices.py` | `--from-file`, `--out` | Parse a saved pricing page or choose the price JSON output. |
 | `render.py` | `--in`, `--out`, `--title`, `--theme`, `--data-url` | Select JSON, HTML output, title, light/dark theme, or live JSON URL. |
@@ -99,11 +102,30 @@ Forked files that contain reliable `token_usage_record` events use those records
 alone, because Codex can replay the parent's historical `token_count` stream into
 the child file. Reliable records are also de-duplicated by `response_id` across
 rollout files because a fork can replay the same request with a new timestamp.
+For older fork siblings that have only legacy counters, identical same-tier delta
+segments sharing one `forked_from_id` are counted once. This removes only exact
+replays; divergent branches are retained.
+
+Each token record also carries `service_tier`: `standard`, `fast`, or `unknown`.
+The historical `priority` setting is normalized to `fast`. A tier in the usage
+event is preferred; otherwise the provider uses the surrounding
+`thread_settings_applied` timeline. Records with no tier evidence are priced at
+Standard and remain visible in the `unknown` breakdown.
 
 ### Pricing
 
 - [scripts/fetch_prices.py](scripts/fetch_prices.py) extracts standard-tier tables
   from the OpenAI pricing page and caches short/long-context rates in `prices.json`.
+- [prices.subscription.json](prices.subscription.json) stores the published
+  subscription credit rates and model-specific Fast multipliers. The official
+  subscription table maps to the current API Standard table at **25 credits per
+  $1 of API-equivalent value** for the published models (minor rounding exists in
+  some displayed credit rates). This is an analytical conversion, not the
+  subscription invoice price; plan agreements and credit purchase discounts are
+  separate.
+- The official Fast rules are model-specific: GPT-5.6/Astra and GPT-5.5 use
+  2.5× subscription credits, while GPT-5.4 uses 2×. API Fast/Priority pricing is
+  separate and is never mixed into the subscription credit calculation.
 - Requests with input **above 272,000 tokens** use the long-context column and the
   model key `<model>[1m]`. The threshold is stored in `long_context_threshold`.
 - [prices.overrides.json](prices.overrides.json) fills unpublished model/context
@@ -117,6 +139,10 @@ rollout files because a fork can replay the same request with a new timestamp.
   `usd_standard` prices the same tokens at short-context rates.
   `billable_uncached`, `billable_cached`, and `billable_output` weight each token
   type by its long/short price ratio, so social-chart bars follow the pricing rule.
+- `credits_standard` prices all tokens at the published subscription Standard rate;
+  `credits` applies the observed Fast multiplier; `credits_fast` isolates the
+  actual Fast/priority credit consumption; and `api_usd_from_credits` divides
+  credits by `meta.credits_per_api_usd`.
 
 To work offline, keep the cached prices or explicitly select the bundled snapshot:
 
@@ -128,7 +154,8 @@ python3 scripts/collect.py --prices prices.bundled.json
 
 The report embeds JSON, CSS, JavaScript, SVG charts, and tables in one HTML file.
 It includes period totals, daily usage, weekly quota cycles, complete-cycle
-medians, and expandable details and pricing tables.
+medians, subscription credit/Fast summaries, and expandable details and pricing
+tables.
 
 - Dates use the **viewer's browser time zone**, rebuilding local days from UTC
   `hourly` buckets. Edge days can be partial; fractional-hour zones have only
@@ -160,15 +187,18 @@ fetching. Without `--data-url`, the report makes no network requests.
 
 | Section | Fields / nesting |
 | --- | --- |
-| `meta` | `provider`, `generated`, `accounts`, `homes`, `plans`, `since`, `until`, `cycle_since`, `account_from`, `tz_offset_hours`, `long_context_threshold`, `prices`, `prices_source`, `prices_fetched_at`, `prices_overrides`, `prices_overrides_used`, `complete_pct`, `notes` |
+| `meta` | `provider`, `generated`, `accounts`, `homes`, `plans`, `since`, `until`, `cycle_since`, `account_from`, `tz_offset_hours`, `long_context_threshold`, `prices`, `prices_source`, `prices_fetched_at`, `subscription_prices`, `subscription_prices_source`, `credits_per_api_usd`, `service_tier_counts`, `service_tier_source_counts`, `complete_pct`, `notes` |
 | `daily` | date → account → model key; account-level `_usage_pct` |
 | `hourly` | UTC hour → account → model key; account-level `_usage_pct` |
-| `cycles` | `account`, `plan`, `start`, `end`, `start_utc`, `end_utc`, `peak_at`, `peak_at_utc`, `resets_at_utc`, `hours`, `start_pct`, `peak_pct`, `end_pct`, `consumed_pct`, `complete`, `input`, `output`, `usd`, `usd_per_pct`, `usd_standard`, `usd_standard_per_pct`, `by_model` |
+| `cycles` | `account`, `plan`, `start`, `end`, `start_utc`, `end_utc`, `peak_at`, `peak_at_utc`, `resets_at_utc`, `hours`, `start_pct`, `peak_pct`, `end_pct`, `consumed_pct`, `complete`, `input`, `output`, `usd`, `usd_per_pct`, `usd_standard`, `usd_standard_per_pct`, `credits`, `credits_per_pct`, `credits_standard`, `credits_fast`, `api_usd_from_credits`, `api_usd_from_credits_per_pct`, `by_model` |
 | `summary` | `per_model_full_window`, `per_era_full_window`, `method` |
 
 Model buckets in `daily`, `hourly`, and `cycles[].by_model` share:
 `model`, `context`, `input`, `cached`, `output`, `requests`, `usd`, `usd_standard`,
-`billable_uncached`, `billable_cached`, `billable_output`.
+`billable_uncached`, `billable_cached`, `billable_output`, `credits_standard`,
+`credits`, `credits_fast`, `api_usd_from_credits`, `fast_requests`,
+`standard_requests`, and `unknown_requests`. Account/day buckets and cycle
+`by_model` maps also carry `_service_tiers` with the same aggregate fields.
 
 ## Social-post chart
 
@@ -213,6 +243,9 @@ references. The skill describes the collection, reporting, and chart handoff wor
   are not counted because rollout files provide no counter.
 - Plan tier is recorded in JSON but hidden in the report because logged `plan_type`
   values were observed to disagree with the actual subscription tier.
+- Service tier is not available on every historical request. Unknown records are
+  shown and conservatively priced at Standard; Fast totals are therefore a lower
+  bound for periods with missing tier evidence.
 - Old rollouts use cumulative-total deltas with a fork-safe first snapshot;
   per-request attribution depends on the information available in those logs.
 - `--account-from` filters token records and cycle starts, but currently does not
@@ -230,7 +263,7 @@ Use [scripts/providers/codex.py](scripts/providers/codex.py) as the interface re
 - `parse_homes(specs)`, `default_homes(args)`, `expand_root(root, names=None)` return
   a mapping of account labels to home paths.
 - `scan(homes)` returns `(records, ratelimits)`. Records contain
-  `(ts_iso_utc, account_label, model, input_tokens, cached_input_tokens, output_tokens, request_input_size)`.
+  `(ts_iso_utc, account_label, model, input_tokens, cached_input_tokens, output_tokens, request_input_size, service_tier, tier_source)`.
   Rate limits map account labels to `(ts_iso_utc, used_percent, resets_at_epoch, plan)` samples.
 
 ## Contributing

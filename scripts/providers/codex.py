@@ -6,12 +6,16 @@ possibly inherited fork baseline. A file can contain both formats during an upgr
 legacy events before the first usage record are retained, and overlapping legacy events
 after that transition are ignored. Reliable records are de-duplicated by `response_id`
 across rollout files because forked children can replay parent records with new timestamps.
+Records also carry the observed service tier (`standard`, `fast`, or `unknown`) and its
+source. Historical `priority` settings are normalized to `fast`; when the usage event
+does not carry a tier, the surrounding `thread_settings_applied` timeline is used.
 Quota: `token_count.rate_limits.primary|secondary` samples whose window is the weekly one (>= 10000 min).
 Some forked/subagent rollouts stamp every event with the file-creation time; those events
 are re-timed to `task_started.started_at` when the outer timestamp is stale.
 """
 import datetime
 import glob, json, os
+from collections import defaultdict
 
 NAME = 'codex'
 
@@ -38,6 +42,31 @@ def expand_root(root, names=None):
 def _usage_tuple(value):
     value = value or {}
     return tuple(int(value.get(k) or 0) for k in ('input_tokens', 'cached_input_tokens', 'output_tokens'))
+
+
+def _service_tier(value):
+    """Normalize Codex's historical priority label to the current Fast name."""
+    value = str(value or '').strip().lower()
+    if value in ('fast', 'priority'):
+        return 'fast'
+    if value in ('standard', 'default'):
+        return 'standard'
+    return None
+
+
+def _direct_service_tier(payload):
+    """Read a tier if a future/current per-request event records one directly."""
+    if not isinstance(payload, dict):
+        return None
+    for candidate in (
+        payload.get('service_tier'),
+        (payload.get('usage') or {}).get('service_tier'),
+        (payload.get('metadata') or {}).get('service_tier'),
+    ):
+        tier = _service_tier(candidate)
+        if tier:
+            return tier
+    return None
 
 
 def _has_usage_fields(value):
@@ -83,12 +112,13 @@ def _effective_timestamp(timestamp, turn_start):
     return _format_timestamp(turn_start)
 
 def scan(homes):
-    recs = []; series = {}; seen_usage_ids = set()
+    recs = []; series = {}; seen_usage_ids = set(); seen_legacy_segments = set()
     for acc, home in homes.items():
         series.setdefault(acc, [])
         for f in sorted(glob.glob(os.path.join(home, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))):
             model = '?'; first_model = '?'; prev = None; session_meta = {}
-            legacy = []; usage_records = []
+            active_tier = None
+            legacy = []; legacy_by_tier = defaultdict(list); usage_records = []
             rows = []
             with open(f, 'rb') as fh:
                 for raw_line in fh:
@@ -113,6 +143,12 @@ def scan(homes):
                     continue
                 if typ == 'event_msg' and p.get('type') == 'task_started':
                     active_turn = p.get('turn_id') or active_turn
+                    continue
+                if typ == 'event_msg' and p.get('type') == 'thread_settings_applied':
+                    settings = p.get('thread_settings') or {}
+                    tier = _service_tier(settings.get('service_tier'))
+                    if tier:
+                        active_tier = tier
                     continue
                 if typ == 'turn_context':
                     candidate = p.get('model') or '?'
@@ -149,7 +185,11 @@ def scan(homes):
                     i, c, o = delta
                     if i > 0 or o > 0:
                         size = int(last_usage[0] or i) if last_present else i
-                        legacy.append((timestamp, acc, model, i, c, o, size))
+                        tier = _direct_service_tier(p) or active_tier or 'unknown'
+                        source = 'direct' if _direct_service_tier(p) else ('timeline' if active_tier else 'unknown')
+                        record = (timestamp, acc, model, i, c, o, size, tier, source)
+                        legacy.append(record)
+                        legacy_by_tier[tier].append(record)
                     continue
                 if typ == 'token_usage_record':
                     response_id = p.get('response_id')
@@ -163,9 +203,26 @@ def scan(homes):
                     input_tokens = int(u.get('input_tokens') or 0)
                     cached_input_tokens = int(u.get('cached_input_tokens') or 0)
                     output_tokens = int(u.get('output_tokens') or 0)
-                    usage_records.append((timestamp, acc, model, input_tokens, cached_input_tokens, output_tokens, input_tokens))
+                    tier = _direct_service_tier(p) or active_tier or 'unknown'
+                    source = 'direct' if _direct_service_tier(p) else ('timeline' if active_tier else 'unknown')
+                    usage_records.append((timestamp, acc, model, input_tokens, cached_input_tokens, output_tokens, input_tokens, tier, source))
             legacy = _fill_unknown_model(legacy, first_model)
             usage_records = _fill_unknown_model(usage_records, first_model)
+            # Forks created before reliable usage records can contain identical
+            # legacy Fast/standard segments in sibling rollout files. Remove only
+            # exact same-tier delta sequences from siblings sharing a parent id;
+            # unrelated sessions and divergent branches remain untouched.
+            fork_parent = session_meta.get('forked_from_id')
+            if fork_parent and not usage_records:
+                kept = []
+                for tier, events in legacy_by_tier.items():
+                    signature = tuple(event[3:6] for event in events)
+                    marker = (acc, fork_parent, tier, signature)
+                    if not signature or marker in seen_legacy_segments:
+                        continue
+                    seen_legacy_segments.add(marker)
+                    kept.extend(_fill_unknown_model(events, first_model))
+                legacy = kept
             if usage_records:
                 if session_meta.get('forked_from_id'):
                     # Fork logs can replay the parent's historical token_count stream before

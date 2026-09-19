@@ -1,0 +1,20 @@
+{
+ "_source": "https://learn.chatgpt.com/docs/pricing",
+ "_speed_source": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+ "_fetched_at": "2026-09-20",
+ "_unit": "ChatGPT/Codex credits per 1M tokens",
+ "fallback_model": "gpt-5.6-sol",
+ "_credits_per_api_usd": 25,
+ "_conversion_note": "Analytical API-equivalent conversion from the published standard credit and API tables; not the user's subscription purchase price.",
+ "_fast_note": "Fast/priority is the subscription credit multiplier. Historical priority settings are normalized to fast.",
+ "models": {
+  "gpt-6-astra": {"standard": {"input": 250, "cached": 25, "output": 1250}, "fast_multiplier": 2.5},
+  "gpt-5.6-sol": {"standard": {"input": 100, "cached": 10, "output": 500}, "fast_multiplier": 2.5},
+  "gpt-5.6-terra": {"standard": {"input": 50, "cached": 5, "output": 300}, "fast_multiplier": 2.5},
+  "gpt-5.6-luna": {"standard": {"input": 5, "cached": 0.5, "output": 30}, "fast_multiplier": 2.5},
+  "gpt-5.5": {"standard": {"input": 125, "cached": 12.5, "output": 750}, "fast_multiplier": 2.5},
+  "gpt-5.4": {"standard": {"input": 62.5, "cached": 6.25, "output": 375}, "fast_multiplier": 2.0},
+  "gpt-5.4-mini": {"standard": {"input": 18.75, "cached": 1.875, "output": 113}, "fast_multiplier": 2.0},
+  "codex-auto-review": {"standard": {"input": 5, "cached": 0.5, "output": 30}, "fast_multiplier": 2.5}
+ }
+}

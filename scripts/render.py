@@ -234,7 +234,9 @@ JAVASCRIPT = r"""
     const sorted = [...values].sort((a, b) => a - b), middle = Math.floor(sorted.length / 2);
     return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
   };
-  const blank = () => ({input: 0, cached: 0, output: 0, requests: 0, usd: 0, usd_standard: 0});
+  const blank = () => ({input: 0, cached: 0, output: 0, requests: 0, usd: 0, usd_standard: 0,
+    credits_standard: 0, credits: 0, credits_fast: 0, api_usd_from_credits: 0,
+    fast_requests: 0, standard_requests: 0, unknown_requests: 0});
   const merge = (target, source) => {
     for (const [key, value] of entries(source)) {
       if (!target.has(key)) target.set(key, blank());
@@ -362,8 +364,11 @@ JAVASCRIPT = r"""
   }
   function calendarDays() {
     const observed = [...localDaily.keys()].sort();
-    const first = data.meta.since ? localDay(data.meta.since + 'T00:00:00Z') : observed[0];
-    const last = data.meta.until ? localDay(Date.parse(data.meta.until + 'T00:00:00Z') + 86400000 - 1) : observed.at(-1);
+    // The collector's since/until labels are already in its requested fixed
+    // offset. Treat them as calendar labels; adding a day and converting
+    // through UTC makes an Asia/Taipei report invent an extra trailing day.
+    const first = data.meta.since || observed[0];
+    const last = data.meta.until || observed.at(-1);
     if (!first || !last) return observed;
     // Advance calendar labels in UTC to avoid skipping/repeating a day at DST changes.
     const start = Date.parse([first, ...observed].sort()[0] + 'T00:00:00Z');
@@ -384,6 +389,8 @@ JAVASCRIPT = r"""
         if (bucket.quota != null) quotas.set(acc, bucket.quota);
       }
       return {day, models, observed, quotas, usd: sum([...models.values()], 'usd'),
+        credits: sum([...models.values()], 'credits'), credits_standard: sum([...models.values()], 'credits_standard'),
+        credits_fast: sum([...models.values()], 'credits_fast'), api_usd_from_credits: sum([...models.values()], 'api_usd_from_credits'),
         quota: quotas.size ? [...quotas.values()].reduce((a, b) => a + b, 0) : null};
     });
   }
@@ -429,6 +436,18 @@ JAVASCRIPT = r"""
     replace('weekly-values', ...(weekly.length ? weekly : [el('p', {class: 'sub'}, 'No complete cycles available.')]));
     $('weekly-range').textContent = 'Grouped by highest-USD model family';
     $('weekly-note').textContent = 'Raw complete cycles; includes mixed usage, without scaling to 100%.';
+    const rows = rowsFor(null), credits = sum(rows, 'credits'), standardCredits = sum(rows, 'credits_standard'), fastCredits = sum(rows, 'credits_fast'), creditUsd = sum(rows, 'api_usd_from_credits');
+    const cards2 = [
+      ['Subscription credits consumed', number(credits) + ' credits', 'Estimated with observed Standard/Fast tier; standard baseline ' + number(standardCredits)],
+      ['Fast / priority credits', number(fastCredits) + ' credits', 'Fast portion of consumed credits · ' + (credits ? number(fastCredits / credits * 100) : '0') + '%'],
+      ['API-equivalent from credits', money(creditUsd) + ' USD', 'Credits ÷ ' + number(data.meta.credits_per_api_usd || 25) + ' credits per $1']
+    ].map(([label, amount, note]) => {
+      const card = el('article', {class: 'metric billing-metric'});
+      card.append(el('h3', {}, label), el('div', {class: 'amount'}, amount), el('p', {class: 'micro'}, note));
+      return card;
+    });
+    replace('billing-metrics', ...cards2);
+    $('billing-note').textContent = 'Credits are subscription consumption estimates; API-equivalent USD remains the independent API-rate view above. Unknown-tier records are priced at Standard speed.';
   }
 
   function renderTabs() {
@@ -500,7 +519,9 @@ JAVASCRIPT = r"""
     renderLegend('daily-legend', used, true);
     const total = sum(currentRows, 'usd'), active = selected == null ? 'All accounts' : selected;
     const peak = currentRows.reduce((best, row) => row.usd > (best?.usd || 0) ? row : best, null);
-    $('daily-summary').textContent = active + ' · ' + money(total) + (peak ? ' · peak ' + peak.day.slice(5).replace('-', '/') + ' ' + money(peak.usd) : ' · no usage records');
+    const creditTotal = sum(currentRows, 'credits'), fastCreditTotal = sum(currentRows, 'credits_fast');
+    $('daily-summary').textContent = active + ' · ' + money(total) + ' API USD · ' + number(creditTotal) + ' credits' +
+      (fastCreditTotal ? ' · Fast ' + number(fastCreditTotal) : '') + (peak ? ' · peak ' + peak.day.slice(5).replace('-', '/') + ' ' + money(peak.usd) : ' · no usage records');
     $('quota-note').textContent = selected == null ? 'The quota line sums daily percentage points across accounts. Resets can push consumption above 100%. Gaps mean no records.' : 'The quota line shows daily consumption; it can exceed 100% after resets. Gaps mean no records.';
     const root = $('daily-chart');
     if (!currentRows.length || !currentRows.some(row => row.observed)) {
@@ -617,10 +638,12 @@ JAVASCRIPT = r"""
       const c = row.cycle;
       tip.append(el('p', {class: 'sub'}, localTime(c.start_utc) + ' → ' + localTime(c.end_utc)),
         el('p', {class: 'sub'}, number(c.hours) + ' h · used ' + pct(c.consumed_pct) + ' · ' + (c.usd_per_pct == null ? '—' : money(c.usd_per_pct)) + ' / 1 %'),
+        el('p', {class: 'sub'}, number(c.credits) + ' credits · Fast ' + number(c.credits_fast || 0) + ' · ' + money(c.api_usd_from_credits || 0) + ' API USD equivalent'),
         el('p', {class: 'sub'}, 'Peak ' + pct(c.peak_pct) + ' at ' + localTime(c.peak_at_utc)));
     } else {
       tip.append(el('p', {class: 'sub'}, quotaLabel + ' · ' + pct(row.quota)));
       if (quotaDetail) tip.append(el('p', {class: 'sub'}, quotaDetail));
+      tip.append(el('p', {class: 'sub'}, number(row.credits) + ' credits · Fast ' + number(row.credits_fast || 0) + ' · ' + money(row.api_usd_from_credits || 0) + ' API USD equivalent'));
     }
     const tokenTotals = el('p', {class: 'sub'});
     tokenTotals.append(tokenNode(sum([...row.models.values()], 'input'), 'Input '),
@@ -675,12 +698,15 @@ JAVASCRIPT = r"""
   function windowCard(label, value, index) {
     const card = el('article', {class: 'metric window-card', 'data-window': label});
     card.style.setProperty('--series', 'var(--s' + index % 8 + ')');
-    card.append(el('h3', {}, label), el('p', {class: 'micro'}, 'Average USD per full window'));
+    card.append(el('h3', {}, label), el('p', {class: 'micro'}, 'Average API USD per full window'));
     const amount = el('div', {class: 'amount'}); countUp(amount, value.avg_usd_per_window); card.append(amount);
     const stats = el('dl', {class: 'window-stats'});
     for (const [name, text] of [
       ['Average input tokens', tokens(value.avg_input_per_window)],
       ['Average output tokens', tokens(value.avg_output_per_window)],
+      ['Average subscription credits', number(value.avg_credits_per_window)],
+      ['Average Fast credits', number(value.avg_credits_fast_per_window || 0)],
+      ['Credits → API USD', money(value.avg_api_usd_from_credits_per_window || 0)],
       ['Hours to consume a window', number(value.avg_hours_per_window) + ' h'],
       ['USD per 1 % quota', money(value.usd_per_pct)],
       ['Input tokens per 1 % quota', tokens(value.input_per_pct)],
@@ -707,10 +733,13 @@ JAVASCRIPT = r"""
       .sort((a, b) => Number(family(a) === 'codex-auto-review') - Number(family(b) === 'codex-auto-review'));
     $('daily-details-heading').textContent = 'Daily details · ' + (selected == null ? 'All accounts' : selected);
     const table = el('table'), head = el('thead'), first = el('tr'), second = el('tr'), body = el('tbody');
-    table.append(el('caption', {}, 'Daily usage' + (multi ? ' · ' + (selected == null ? 'All accounts' : selected) : '') + ' · K/M/B tokens (raw counts on hover), USD and daily quota consumption'));
+    table.append(el('caption', {}, 'Daily usage' + (multi ? ' · ' + (selected == null ? 'All accounts' : selected) : '') + ' · K/M/B tokens (raw counts on hover), API USD, subscription credits and daily quota consumption'));
     first.append(th('Date', {rowspan: 2}));
     if (multi) for (const acc of accounts) { first.append(th(acc, {colspan: 2, scope: 'colgroup'})); second.append(th('USD'), th('Quota %')); }
     first.append(th('Observed total USD', {rowspan: 2}));
+    first.append(th('Credits consumed', {rowspan: 2}));
+    first.append(th('Fast credits', {rowspan: 2}));
+    first.append(th('Credits → API USD', {rowspan: 2}));
     first.append(th(selected == null ? quotaLabel : 'quota %', {rowspan: 2}));
     for (const key of keys) {
       const group = th('', {colspan: 3, scope: 'colgroup'}); group.append(modelLabel(key)); first.append(group);
@@ -731,7 +760,8 @@ JAVASCRIPT = r"""
         if (quota != null) { total.quota += quota; total.quotaObserved = true; }
       }
       console.assert(Math.abs(accountUsd - row.usd) < 1e-7, 'Daily table/chart USD mismatch', row.day, accountUsd, row.usd);
-      tr.append(td(row.observed ? money(accountUsd) : '—'), td(pct(row.quota)));
+      tr.append(td(row.observed ? money(accountUsd) : '—'), td(row.observed ? number(row.credits) : '—'),
+        td(row.observed && row.credits_fast ? number(row.credits_fast) : '—'), td(row.observed ? money(row.api_usd_from_credits) : '—'), td(pct(row.quota)));
       for (const key of keys) {
         const value = row.models.get(key);
         tr.append(tokenNode(value?.input, '', 'td'), tokenNode(value?.output, '', 'td'), td(value ? money(value.usd) : '—'));
@@ -744,6 +774,9 @@ JAVASCRIPT = r"""
     console.assert(Math.abs(tableUsd - sum(currentRows, 'usd')) < 1e-7, 'Daily table/chart grand total mismatch');
     for (const [account, total] of totals) console.assert(Math.abs(total.usd - sum(rowsFor(account), 'usd')) < 1e-7, 'Account table/chart USD mismatch', account);
     tr.append(td(currentRows.some(r => r.observed) ? money(tableUsd) : '—'));
+    tr.append(td(currentRows.some(r => r.observed) ? number(sum(currentRows, 'credits')) : '—'),
+      td(currentRows.some(r => r.observed) && sum(currentRows, 'credits_fast') ? number(sum(currentRows, 'credits_fast')) : '—'),
+      td(currentRows.some(r => r.observed) ? money(sum(currentRows, 'api_usd_from_credits')) : '—'));
     const quotas = currentRows.map(r => r.quota).filter(v => v != null);
     tr.append(td(quotas.length ? pct(quotas.reduce((a, b) => a + b, 0)) : '—'));
     for (const key of keys) {
@@ -771,7 +804,8 @@ JAVASCRIPT = r"""
       for (const c of rows) {
         const row = el('div', {class: 'cycle-row ' + (complete(c) ? 'full' : 'partial'), tabindex: 0, role: 'button',
           'aria-label': c.account + ', ' + localTime(c.start_utc) + ' → ' + localTime(c.end_utc) + ', used ' + pct(c.consumed_pct) + ', ' + money(c.usd) + ', show cycle details'});
-        bindTooltip(row, {cycle: c, observed: true, usd: c.usd, models: new Map(entries(c.by_model)), quotas: new Map()});
+        bindTooltip(row, {cycle: c, observed: true, usd: c.usd, credits: c.credits, credits_fast: c.credits_fast,
+          api_usd_from_credits: c.api_usd_from_credits, models: new Map(entries(c.by_model)), quotas: new Map()});
         const label = el('div', {class: 'cycle-meta'});
         label.append(el('span', {class: 'badge'}, number(c.consumed_pct) + ' %'),
           el('span', {}, localTime(c.start_utc) + ' → ' + localTime(c.end_utc)));
@@ -788,7 +822,8 @@ JAVASCRIPT = r"""
         }
         track.append(fill); fills.push(fill);
         const amount = el('div', {class: 'cycle-value'}, money(c.usd));
-        amount.append(el('small', {}, (c.usd_per_pct == null ? '—' : money(c.usd_per_pct)) + ' / 1%'));
+        amount.append(el('small', {}, number(c.credits) + ' credits'), el('small', {}, 'Fast ' + number(c.credits_fast || 0)),
+          el('small', {}, (c.usd_per_pct == null ? '—' : money(c.usd_per_pct)) + ' / 1%'));
         row.append(label, track, amount); group.append(row);
       }
       groups.push(group);
@@ -817,7 +852,7 @@ JAVASCRIPT = r"""
     const table = el('table'), head = el('thead'), first = el('tr'), second = el('tr'), body = el('tbody');
     table.append(el('caption', {}, 'Quota cycle details · K/M/B tokens (raw counts on hover); input includes cached tokens'));
     [...(single ? [] : ['Account']), 'Start', 'End', 'Peak at', 'Hours', 'Start → peak %', 'Quota consumed %', 'Status'].forEach(label => first.append(th(label, {rowspan: 2})));
-    ['Total USD', 'USD / 1% quota'].forEach(label => first.append(th(label, {rowspan: 2})));
+    ['Total USD', 'Credits', 'Fast credits', 'Credits → API USD', 'USD / 1% quota', 'Credits / 1% quota'].forEach(label => first.append(th(label, {rowspan: 2})));
     for (const key of keys) {
       const group = th('', {colspan: 3, scope: 'colgroup'}); group.append(modelLabel(key)); first.append(group);
       second.append(th('Input'), th('Output'), th('USD'));
@@ -829,7 +864,9 @@ JAVASCRIPT = r"""
       if (!single) row.append(th(cycle.account, {scope: 'row'}));
       row.append(single ? th(localTime(cycle.start_utc), {scope: 'row'}) : td(localTime(cycle.start_utc)), td(localTime(cycle.end_utc)), td(localTime(cycle.peak_at_utc)), td(number(cycle.hours || 0)),
         td(pct(cycle.start_pct) + ' → ' + pct(cycle.peak_pct)), td(pct(cycle.consumed_pct)), td(complete(cycle) ? '✓' : '—'));
-      row.append(td(money(cycle.usd)), td(cycle.usd_per_pct == null ? '—' : money(cycle.usd_per_pct)));
+      row.append(td(money(cycle.usd)), td(number(cycle.credits)), td(cycle.credits_fast ? number(cycle.credits_fast) : '—'),
+        td(money(cycle.api_usd_from_credits || 0)), td(cycle.usd_per_pct == null ? '—' : money(cycle.usd_per_pct)),
+        td(cycle.credits_per_pct == null ? '—' : number(cycle.credits_per_pct)));
       for (const key of keys) {
         const value = cycle.by_model[key];
         row.append(tokenNode(value?.input, '', 'td'), tokenNode(value?.output, '', 'td'), td(value ? money(value.usd) : '—'));
@@ -852,23 +889,26 @@ JAVASCRIPT = r"""
   function renderPrices() {
     if (!modelKeys.length) { replace('price-table', el('p', {class: 'empty'}, 'No models in use.')); return; }
     const table = el('table'), head = el('thead'), header = el('tr'), body = el('tbody');
-    table.append(el('caption', {}, 'USD / 1M tokens · model keys present in the data'));
+    table.append(el('caption', {}, 'API USD and subscription credits / 1M tokens · model keys present in the data'));
     ['Model key', 'Input (standard)', 'Cached input (standard)', 'Output (standard)',
-      'Long applied · input / cached / output', 'Notes'].forEach(label => header.append(th(label)));
+      'Long applied · input / cached / output', 'Subscription credits · input / cached / output', 'Fast multiplier', 'Notes'].forEach(label => header.append(th(label)));
     head.append(header);
     // Pricing needs more precision than usage labels (for example $0.02 cached input).
     const exactRate = value => value == null ? '—' : Number(value).toLocaleString('en-US', {maximumFractionDigits: 10});
     for (const key of modelKeys) {
       const row = el('tr'), label = th('', {scope: 'row'}); label.append(modelLabel(key)); row.append(label);
       const standard = data.meta.prices?.[family(key)]?.short, applied = priceFor(key);
+      const subscription = data.meta.subscription_prices?.[family(key)], subscriptionRates = subscription?.standard;
       ['input', 'cached', 'output'].forEach(field => row.append(td(exactRate(standard?.[field]))));
       row.append(td(isLong(key) && applied.rates ? ['input', 'cached', 'output'].map(f => exactRate(applied.rates[f])).join(' / ') : '—'));
-      row.append(td(family(key) === 'codex-auto-review' ? 'priced at gpt-5.6-luna rates (owner decision)' :
+      row.append(td(subscriptionRates ? ['input', 'cached', 'output'].map(f => exactRate(subscriptionRates[f])).join(' / ') : 'fallback'));
+      row.append(td(subscription?.fast_multiplier == null ? '—' : number(subscription.fast_multiplier) + '×'));
+      row.append(td(family(key) === 'codex-auto-review' ? 'API/subscription fallback uses gpt-5.6-sol unless overridden; API review rate remains owner decision' :
         !applied.rates ? applied.note : isLong(key) ? applied.note : 'Standard applied'));
       body.append(row);
     }
     table.append(head, body); replace('price-table', wrapTable(table, 'API prices'));
-    $('price-note').textContent = 'USD uses the applied context column; usd_standard values price the same tokens at standard rates. Missing long rates use standard rates. Unknown fallback rates are left unlisted; stored USD remains authoritative.';
+    $('price-note').textContent = 'API USD uses the applied context column; subscription credits use the published standard credit table and the observed Fast multiplier. Long-context subscription credits use the same published model rate because the subscription table does not publish a separate long column. Credits ÷ ' + number(data.meta.credits_per_api_usd || 25) + ' is an analytical API-equivalent conversion, not money paid.';
   }
   function renderCaveats() {
     const meta = data.meta, list = el('ul');
@@ -880,9 +920,12 @@ JAVASCRIPT = r"""
       'Only records on this machine are counted; usage elsewhere is invisible. ' + (from ? from + '.' : ''),
       '[1m] means request input >' + threshold + ' tokens, priced at long-context rates; each model key is counted separately.',
       'Input includes cached tokens; output includes reasoning. Cache writes are not recorded or counted. USD is API-equivalent value, not money paid.',
+      'Subscription credits are separate from API billing: standard credits follow the published Codex table, Fast/priority uses the model multiplier, and unknown tiers are conservatively priced at Standard.',
+      'The credits → API USD figure is an analytical conversion using ' + number(meta.credits_per_api_usd || 25) + ' credits per $1; it does not claim that the subscription charge equals API spend.',
+      'Observed service tiers: ' + Object.entries(meta.service_tier_counts || {}).map(([tier, count]) => tier + ' ' + number(count) + ' requests').join(' · ') + '. Tier source: direct event where available, otherwise settings timeline.',
       'Complete cycles reach peak ≥' + number(meta.complete_pct ?? 95) + '%; observation need not start at 0%. Cycles retain their full observed intervals, which may extend beyond the date range. Medians use raw cycle USD, including mixed usage, without extrapolation.',
       'Daily quota % means percentage points consumed. Percentage points are summed across accounts; resets can push consumption above 100%. A dash means missing data, not zero. The first and last local day may be partial because the source range is UTC days. Hourly buckets are assigned by their local start; zones with fractional-hour offsets have hour-level boundary precision.',
-      'Prices fetched at ' + localTime(meta.prices_fetched_at) + '; source ' + (meta.prices_source || 'not provided') + '. ' +
+      'Prices fetched at ' + localTime(meta.prices_fetched_at) + '; source ' + (meta.prices_source || 'not provided') + '. Subscription rates source ' + (meta.subscription_prices_source || 'not provided') + '. ' +
         (meta.prices_overrides ? 'Applied overrides: ' + meta.prices_overrides + '.' : '')
     ];
     notes.forEach(note => list.append(el('li', {}, note)));
@@ -970,7 +1013,7 @@ def script_json(value):
             .replace('\u2028', '\\u2028').replace('\u2029', '\\u2029'))
 
 
-def render(data, title='Codex usage, valued at API prices', theme='light', data_url=None):
+def render(data, title='Codex usage · API value and subscription credits', theme='light', data_url=None):
     """Package data only: all report calculations and DOM rendering live in JS."""
     if theme not in ('light', 'dark'):
         raise ValueError('theme must be light or dark')
@@ -1004,6 +1047,11 @@ def render(data, title='Codex usage, valued at API prices', theme='light', data_
     <div class="heading-row"><h2 id="totals-heading">API-equivalent value during this period</h2><span class="micro" id="grand-total"></span></div>
     <div class="metrics" id="metrics"></div>
   </section>
+  <section class="panel" aria-labelledby="billing-heading">
+    <div class="heading-row"><h2 id="billing-heading">Subscription credits and Fast usage</h2><span class="micro">Standard baseline, observed multiplier, and API-equivalent conversion</span></div>
+    <div class="metrics" id="billing-metrics"></div>
+    <p class="sub" id="billing-note"></p>
+  </section>
   <section class="weekly" aria-labelledby="weekly-heading">
     <div><h2 id="weekly-heading">Median value of observed complete cycles</h2><p class="micro" id="weekly-range"></p><p class="micro" id="weekly-note"></p></div>
     <div class="weekly-values" id="weekly-values"></div>
@@ -1023,23 +1071,23 @@ def render(data, title='Codex usage, valued at API prices', theme='light', data_
 <div class="details-area">
   <details class="disclosure" id="daily-details">
     <summary id="daily-details-heading">Daily details · models and quota</summary>
-    <div class="detail-body"><p class="sub">Follows the account selection above. Each row is one day; quota % is percentage points consumed. Totals cover observed accounts, not average utilisation.</p><div id="daily-table"></div></div>
+    <div class="detail-body"><p class="sub">Follows the account selection above. Each row is one day; quota % is percentage points consumed. Totals cover observed accounts, not average utilisation. Credits are subscription estimates; API USD is a separate rate view.</p><div id="daily-table"></div></div>
   </details>
   <section class="cycle-section" aria-labelledby="cycle-heading">
     <h2 id="cycle-heading">Weekly quota cycles</h2>
     <p class="sub" id="cycle-range"></p>
-    <p class="sub">Badges show the percentage consumed; a check marks cycles that reached the complete threshold. Hover, focus, or tap a bar for details. Bars show raw USD, with value per 1% quota on the right.</p>
+    <p class="sub">Badges show the percentage consumed; a check marks cycles that reached the complete threshold. Hover, focus, or tap a bar for details. Bars show raw API USD, with subscription credits alongside.</p>
     <div class="legend" id="cycle-legend" aria-label="Cycle model legend"></div>
     <div class="cycle-scale" id="cycle-scale" aria-hidden="true"></div>
     <div class="cycle-groups" id="cycle-groups"></div>
     <details class="disclosure" id="cycle-details">
       <summary id="cycle-details-heading">Cycle details · tokens and USD by model</summary>
-      <div class="detail-body"><p class="sub">USD / 1% quota uses the supplied value: cycle USD ÷ max(peak minus starting percentage points, 1). Each model key, including [1m], has its own columns.</p><div id="cycle-table"></div></div>
+      <div class="detail-body"><p class="sub">USD / 1% quota uses cycle API USD ÷ max(peak minus starting percentage points, 1). Credits / 1% uses estimated subscription credits with the same denominator. Each model key, including [1m], has its own columns.</p><div id="cycle-table"></div></div>
     </details>
   </section>
   <details class="disclosure" id="price-details">
-    <summary>Pricing · applied API rates</summary>
-    <div class="detail-body"><p class="sub">Only observed models and contexts are listed. Rates are per million tokens; cache writes are excluded.</p><div id="price-table"></div><p class="sub" id="price-note"></p></div>
+    <summary>Pricing · API rates and subscription credits</summary>
+    <div class="detail-body"><p class="sub">Only observed models and contexts are listed. API rates and subscription credits are per million tokens; cache writes are excluded.</p><div id="price-table"></div><p class="sub" id="price-note"></p></div>
   </details>
   <aside class="caveats" aria-labelledby="caveats-heading"><h2 id="caveats-heading">Caveats</h2><div id="caveat-list"></div></aside>
 </div>
@@ -1060,7 +1108,7 @@ def main():
     root = Path(__file__).resolve().parent.parent
     parser.add_argument('--in', dest='inp', default=root / 'out' / 'usage.json')
     parser.add_argument('--out', default=root / 'out' / 'report.html')
-    parser.add_argument('--title', default='Codex usage, valued at API prices')
+    parser.add_argument('--title', default='Codex usage · API value and subscription credits')
     parser.add_argument('--theme', choices=('light', 'dark'), default='light')
     parser.add_argument('--data-url', metavar='URL', help='Fetch this JSON URL at page load; use the embedded snapshot if fetching fails')
     args = parser.parse_args()

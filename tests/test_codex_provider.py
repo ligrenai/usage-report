@@ -37,7 +37,7 @@ def count(timestamp, total, last, model=None, rate_limits=None):
     return event(timestamp, payload)
 
 
-def record(timestamp, input_tokens, cached, output, response_id=None):
+def record(timestamp, input_tokens, cached, output, response_id=None, service_tier=None):
     payload = {'usage': {
         'input_tokens': input_tokens,
         'cached_input_tokens': cached,
@@ -45,7 +45,13 @@ def record(timestamp, input_tokens, cached, output, response_id=None):
     }}
     if response_id:
         payload['response_id'] = response_id
+    if service_tier:
+        payload['service_tier'] = service_tier
     return event(timestamp, payload, 'token_usage_record')
+
+
+def settings(timestamp, service_tier):
+    return event(timestamp, {'type': 'thread_settings_applied', 'thread_settings': {'service_tier': service_tier}})
 
 
 def session_meta(timestamp='2026-07-01T00:00:00Z', forked_from_id=None):
@@ -147,6 +153,41 @@ class CodexProviderTests(unittest.TestCase):
         ]
         records = self.scan_rows(rows)
         self.assertEqual([r[2] for r in records], ['gpt-5.6-sol', 'gpt-6-astra'])
+
+    def test_service_tier_is_inferred_from_settings_and_priority_is_fast(self):
+        records = self.scan_rows([
+            turn('2026-07-01T00:00:00Z', 'gpt-5.6-sol'),
+            settings('2026-07-01T00:00:01Z', 'priority'),
+            record('2026-07-01T00:00:02Z', 100, 90, 5),
+            settings('2026-07-01T00:00:03Z', 'default'),
+            record('2026-07-01T00:00:04Z', 200, 180, 6),
+        ])
+        self.assertEqual([(r[7], r[8]) for r in records], [('fast', 'timeline'), ('standard', 'timeline')])
+
+    def test_direct_service_tier_wins_over_timeline(self):
+        records = self.scan_rows([
+            turn('2026-07-01T00:00:00Z', 'gpt-5.6-sol'),
+            settings('2026-07-01T00:00:01Z', 'default'),
+            record('2026-07-01T00:00:02Z', 100, 90, 5, service_tier='priority'),
+        ])
+        self.assertEqual((records[0][7], records[0][8]), ('fast', 'direct'))
+
+    def test_identical_legacy_segments_from_fork_siblings_are_counted_once(self):
+        def rows():
+            return [
+                session_meta(forked_from_id='parent-session'),
+                turn('2026-07-01T00:00:00Z', 'gpt-5.6-sol'),
+                settings('2026-07-01T00:00:00Z', 'priority'),
+                count('2026-07-01T00:00:01Z',
+                      {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5},
+                      {'input_tokens': 100, 'cached_input_tokens': 90, 'output_tokens': 5}),
+                count('2026-07-01T00:00:02Z',
+                      {'input_tokens': 150, 'cached_input_tokens': 130, 'output_tokens': 8},
+                      {'input_tokens': 50, 'cached_input_tokens': 40, 'output_tokens': 3}),
+            ]
+        records = self.scan_files([('rollout-child-a.jsonl', rows()), ('rollout-child-b.jsonl', rows())])
+        self.assertEqual([(r[3], r[4], r[5]) for r in records], [(100, 90, 5), (50, 40, 3)])
+        self.assertEqual({r[2] for r in records}, {'gpt-5.6-sol'})
 
     def test_duplicate_response_ids_across_fork_logs_are_counted_once(self):
         parent_rows = [
