@@ -149,19 +149,30 @@ def _replayed_legacy_prefix(child, parent):
     return best if best >= 2 else 0
 
 def scan(homes, files=None, include_effort=False, quota_callback=None):
+    return _scan(homes, files, include_effort, quota_callback)
+
+
+def _scan(homes, files=None, include_effort=False, quota_callback=None, session_root=None):
     recs = []; series = {}; seen_usage_ids = set(); seen_legacy_segments = set()
     for acc, home in homes.items():
         series.setdefault(acc, [])
         parsed_files = []
         session_index = {}
         paths = files.get(acc, []) if files is not None else glob.glob(os.path.join(home, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))
+        permitted_root = (os.path.realpath(session_root) if session_root is not None
+                          else os.path.join(os.path.realpath(home), 'sessions'))
         for f in sorted(paths):
+            if os.path.islink(f) or not os.path.isfile(f):
+                raise ValueError(f'not a regular rollout file: {f}')
+            resolved = os.path.realpath(f)
+            if os.path.commonpath((permitted_root, resolved)) != permitted_root:
+                raise ValueError(f'rollout file outside sessions: {f}')
             model = '?'; first_model = '?'; prev = None; effort = '?'
             session_ids = set(); primary_session_id = None; forked_from_id = None
             active_tier = None
             legacy = []; legacy_by_tier = defaultdict(list); usage_records = []
             rows = []
-            with open(f, 'rb') as fh:
+            with os.fdopen(os.open(f, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as fh:
                 for raw_line in fh:
                     try: j = json.loads(raw_line)
                     except Exception: continue

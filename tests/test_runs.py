@@ -47,6 +47,34 @@ class RunsTests(unittest.TestCase):
                     {'type': 'function_call', 'name': 'exec_command', 'call_id': 'open'})])
             self.assertEqual(runs.codex_run(path)['command_busy_union_s']['value'], runs.MISSING)
 
+    def test_tool_without_call_id_does_not_discard_command_busy_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write(Path(directory) / 'rollout-one.jsonl', [
+                row('2026-01-01T00:00:00Z', 'response_item',
+                    {'type': 'function_call', 'name': 'exec_command', 'call_id': 'cmd'}),
+                row('2026-01-01T00:00:01Z', 'response_item',
+                    {'type': 'function_call', 'name': 'read_file'}),
+                row('2026-01-01T00:00:03Z', 'response_item',
+                    {'type': 'function_call_output', 'call_id': 'cmd'})])
+            self.assertEqual(runs.command_measure(path)['command_busy_union_s'], 3)
+
+    def test_command_without_call_id_is_not_measured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write(Path(directory) / 'rollout-one.jsonl', [
+                row('2026-01-01T00:00:00Z', 'response_item',
+                    {'type': 'function_call', 'name': 'exec_command'})])
+            self.assertEqual(runs.command_measure(path)['command_busy_union_s']['value'], runs.MISSING)
+
+    def test_single_rollout_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = write(Path(directory) / 'target.jsonl', [
+                row('2026-01-01T00:00:00Z', 'token_usage_record',
+                    {'usage': {'input_tokens': 1}})])
+            link = Path(directory) / 'rollout-link.jsonl'
+            link.symlink_to(target)
+            with self.assertRaises(ValueError):
+                runs.codex_run(link)
+
     def test_claude_message_max_and_block_sum(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'transcript.jsonl'
@@ -62,6 +90,17 @@ class RunsTests(unittest.TestCase):
             self.assertEqual(result['usage']['output_tokens'], 8)
             self.assertEqual(result['block_sum_output_tokens'], 13)
             self.assertEqual(result['compactions'], 1)
+
+    def test_claude_block_sum_includes_usage_without_message_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write(Path(directory) / 'transcript.jsonl', [
+                {'type': 'assistant', 'message': {'usage': {'output_tokens': 7}}},
+                {'type': 'assistant', 'message': {'id': 'msg1',
+                 'usage': {'output_tokens': 5}}}])
+            result = runs.claude_run(path)
+            self.assertEqual(result['block_sum_output_tokens'], 12)
+            self.assertEqual(result['unique_api_messages'], 1)
+            self.assertEqual(result['usage']['output_tokens'], 5)
 
     def test_capacity_groups_windows_and_billable_tokens(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -97,6 +136,25 @@ class RunsTests(unittest.TestCase):
                       'models': {'x': {'short': {'input': 1, 'cached': 1, 'output': 1}}}}
             windows = runs.capacity({'a': str(home)}, prices)['a']
             self.assertEqual([window['kind'] for window in windows], ['weekly'])
+
+    def test_capacity_boundary_record_belongs_only_to_next_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            path = home / 'sessions' / '2026' / '01' / '01' / 'rollout-one.jsonl'
+            records = [row('2026-01-01T00:00:00Z', 'turn_context', {'model': 'x'})]
+            for time, pct, reset in [('00:00:00', 0, 1000), ('00:00:02', 50, 1000),
+                                     ('00:00:02', 0, 2000), ('00:00:04', 100, 2000)]:
+                records.append(row('2026-01-01T' + time + 'Z', 'event_msg',
+                    {'type': 'token_count', 'rate_limits': {'primary': {
+                        'used_percent': pct, 'resets_at': reset}}}))
+            records.append(row('2026-01-01T00:00:02Z', 'token_usage_record',
+                {'usage': {'input_tokens': 10, 'output_tokens': 1}}))
+            write(path, records)
+            prices = {'long_context_threshold': 272000, 'fallback_model': 'x',
+                      'models': {'x': {'short': {'input': 1, 'cached': 1, 'output': 1}}}}
+            windows = runs.capacity({'a': str(home)}, prices)['a']
+            self.assertEqual([sum(group['samples'] for group in window['by_model_effort'])
+                              for window in windows], [0, 1])
 
 
 if __name__ == '__main__':

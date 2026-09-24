@@ -106,13 +106,17 @@ def command_measure(path):
             name = payload.get('name') or ''
             is_command = name in {'exec', 'exec_command', 'write_stdin', 'wait'} or name.endswith(('exec_command', '__exec', '__write_stdin', '__wait'))
             if is_command: command_count += 1
-            if not call_id or call_id in begins or call_id in noncommands or call_id in ended:
+            if not call_id:
+                if is_command: problems.append('begin lacks a unique call_id')
+            elif call_id in begins or call_id in noncommands or call_id in ended:
                 problems.append('begin lacks a unique call_id')
             elif is_command:
                 begins[call_id] = when
             else:
                 noncommands.add(call_id)
         elif kind in ('function_call_output', 'custom_tool_call_output'):
+            if not call_id:
+                continue
             if call_id in begins:
                 start = begins.pop(call_id)
                 ended.add(call_id)
@@ -148,9 +152,12 @@ def command_measure(path):
 
 
 def codex_run(path):
+    if Path(path).is_symlink():
+        raise ValueError(f'not a regular rollout file: {path}')
     path = safe_file(path)
     result = command_measure(path)
-    records, _ = provider.scan({'run': str(path.parent)}, files={'run': [str(path)]})
+    records, _ = provider._scan({'run': str(path.parent)}, files={'run': [str(path)]},
+                                session_root=str(path.parent))
     result['tokens'] = {'input': sum(r[3] for r in records),
                         'cached': sum(r[4] for r in records),
                         'output': sum(r[5] for r in records)}
@@ -179,6 +186,7 @@ def claude_run(path):
         if message.get('model'): models.add(message['model'])
         usage = message.get('usage')
         if not isinstance(usage, dict): continue
+        block_sum += usage.get('output_tokens') or 0
         ident = message.get('id')
         if not ident: continue
         current = messages.setdefault(ident, {field: 0 for field in CLAUDE_FIELDS})
@@ -187,7 +195,6 @@ def claude_run(path):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValueError(f'invalid Claude usage {field}')
             current[field] = max(current[field], value)
-        block_sum += usage.get('output_tokens') or 0
     return {'unique_api_messages': len(messages), 'models': sorted(models),
             'efforts': sorted(efforts), 'compactions': compactions,
             'first_timestamp': stamp(first) or missing('no timestamp'),
@@ -247,7 +254,9 @@ def capacity(homes, prices):
                 consumed = peak - group[0][1]
                 by = defaultdict(lambda: {'samples': 0, **{field: 0 for field in TOKEN_FIELDS}})
                 low = bisect_left(record_times, start)
-                high = bisect_right(record_times, upper)
+                high = (bisect_left(record_times, next_start)
+                        if next_start is not None and next_start <= end
+                        else bisect_right(record_times, upper))
                 for _, record in timed_records[low:high]:
                     key = (record[2], record[9])
                     bucket = by[key]; bucket['samples'] += 1
