@@ -102,6 +102,14 @@ class RunsTests(unittest.TestCase):
             self.assertEqual(result['unique_api_messages'], 1)
             self.assertEqual(result['usage']['output_tokens'], 5)
 
+    def test_claude_invalid_block_output_without_message_id_is_rejected(self):
+        for bad in (-1, '7', True):
+            with tempfile.TemporaryDirectory() as directory:
+                path = write(Path(directory) / 'transcript.jsonl', [
+                    {'type': 'assistant', 'message': {'usage': {'output_tokens': bad}}}])
+                with self.assertRaises(ValueError):
+                    runs.claude_run(path)
+
     def test_capacity_groups_windows_and_billable_tokens(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

@@ -186,7 +186,10 @@ def claude_run(path):
         if message.get('model'): models.add(message['model'])
         usage = message.get('usage')
         if not isinstance(usage, dict): continue
-        block_sum += usage.get('output_tokens') or 0
+        block_output = usage.get('output_tokens') or 0
+        if not isinstance(block_output, int) or isinstance(block_output, bool) or block_output < 0:
+            raise ValueError('invalid Claude usage output_tokens')
+        block_sum += block_output
         ident = message.get('id')
         if not ident: continue
         current = messages.setdefault(ident, {field: 0 for field in CLAUDE_FIELDS})
