@@ -1,10 +1,12 @@
 import json
+import argparse
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 
 from scripts.providers.codex import scan
+from scripts.collect import collect
 
 
 def event(timestamp, payload, event_type='event_msg'):
@@ -73,6 +75,58 @@ def write_rollout(home, name, rows):
 
 
 class CodexProviderTests(unittest.TestCase):
+    def test_scan_rejects_symlinked_rollout_and_external_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / 'home'
+            outside = Path(temp) / 'outside.jsonl'
+            outside.write_text(json.dumps(record('2026-07-01T00:00:00Z', 1, 0, 1)) + '\n')
+            path = home / 'sessions' / '2026' / '07' / '01' / 'rollout-link.jsonl'
+            path.parent.mkdir(parents=True)
+            path.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                scan({'test': str(home)})
+            with self.assertRaises(ValueError):
+                scan({'test': str(home)}, files={'test': [str(outside)]})
+            internal = path.parent / 'rollout-inside.jsonl'
+            internal.write_text(outside.read_text())
+            path.unlink()
+            path.symlink_to(internal)
+            with self.assertRaises(ValueError):
+                scan({'test': str(home)})
+
+    def test_scan_rejects_sessions_symlink_to_external_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / 'home'
+            external_home = Path(temp) / 'external'
+            write_rollout(external_home, 'rollout-outside.jsonl', [
+                record('2026-07-01T00:00:00Z', 1, 0, 1)])
+            home.mkdir()
+            (home / 'sessions').symlink_to(external_home / 'sessions', target_is_directory=True)
+            with self.assertRaises(ValueError):
+                scan({'test': str(home)})
+
+    def test_regular_rollout_keeps_collect_fixture_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / 'home'
+            write_rollout(home, 'rollout-test.jsonl', [
+                turn('2026-07-01T00:00:00Z', 'gpt-5.6-sol'),
+                record('2026-07-01T00:00:01Z', 100, 20, 10, 'response-1'),
+            ])
+            root = Path(__file__).resolve().parents[1]
+            args = argparse.Namespace(provider='codex', prices=str(root / 'prices.json'),
+                subscription_prices=str(root / 'prices.subscription.json'), tz=0,
+                since='2026-07-01', until='2026-07-01', last_days=14, cycle_days=30,
+                home=['test=' + str(home)], accounts_root=None, accounts=None,
+                account_from=None, min_samples=20, min_tokens=20_000_000,
+                complete_pct=95.0, era_split=None, redact_homes=True, out=str(Path(temp) / 'out'))
+            report = collect(args)
+            bucket = report['daily']['2026-07-01']['test']['gpt-5.6-sol']
+            self.assertEqual(report['meta']['service_tier_counts'], {'unknown': 1})
+            self.assertEqual((bucket['input'], bucket['cached'], bucket['output'],
+                              bucket['requests'], bucket['usd']), (100, 20, 10, 1, 0.000528))
+            self.assertEqual(report['hourly']['2026-07-01T00:00Z']['test']['gpt-5.6-sol'], bucket)
+            self.assertEqual(report['cycles'], [])
+
     def scan_rows(self, rows):
         with tempfile.TemporaryDirectory() as temp:
             write_rollout(temp, 'rollout-test.jsonl', rows)

@@ -148,19 +148,31 @@ def _replayed_legacy_prefix(child, parent):
     # first request. Real copied histories contain a contiguous run.
     return best if best >= 2 else 0
 
-def scan(homes):
+def scan(homes, files=None, include_effort=False, quota_callback=None):
+    return _scan(homes, files, include_effort, quota_callback)
+
+
+def _scan(homes, files=None, include_effort=False, quota_callback=None, session_root=None):
     recs = []; series = {}; seen_usage_ids = set(); seen_legacy_segments = set()
     for acc, home in homes.items():
         series.setdefault(acc, [])
         parsed_files = []
         session_index = {}
-        for f in sorted(glob.glob(os.path.join(home, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))):
-            model = '?'; first_model = '?'; prev = None
+        paths = files.get(acc, []) if files is not None else glob.glob(os.path.join(home, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))
+        permitted_root = (os.path.realpath(session_root) if session_root is not None
+                          else os.path.join(os.path.realpath(home), 'sessions'))
+        for f in sorted(paths):
+            if os.path.islink(f) or not os.path.isfile(f):
+                raise ValueError(f'not a regular rollout file: {f}')
+            resolved = os.path.realpath(f)
+            if os.path.commonpath((permitted_root, resolved)) != permitted_root:
+                raise ValueError(f'rollout file outside sessions: {f}')
+            model = '?'; first_model = '?'; prev = None; effort = '?'
             session_ids = set(); primary_session_id = None; forked_from_id = None
             active_tier = None
             legacy = []; legacy_by_tier = defaultdict(list); usage_records = []
             rows = []
-            with open(f, 'rb') as fh:
+            with os.fdopen(os.open(f, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as fh:
                 for raw_line in fh:
                     try: j = json.loads(raw_line)
                     except Exception: continue
@@ -222,6 +234,7 @@ def scan(homes):
                     if candidate != '?':
                         if first_model == '?': first_model = candidate
                         model = candidate
+                    effort = p.get('effort') or effort
                     continue
                 turn_id = p.get('turn_id') or active_turn
                 turn_start = turn_starts.get(turn_id)
@@ -232,6 +245,8 @@ def scan(homes):
                     rate_timestamp = _effective_timestamp(
                         j.get('timestamp'), turn_start, allow_retime_rate,
                     )
+                    if quota_callback:
+                        quota_callback(acc, rate_timestamp, p.get('rate_limits') or {})
                     for k in ('primary', 'secondary'):
                         rl = (p.get('rate_limits') or {}).get(k)
                         if rl and rl.get('used_percent') is not None and (rl.get('window_minutes') or 0) >= 10000 and rl.get('resets_at'):
@@ -258,6 +273,7 @@ def scan(homes):
                         tier = _direct_service_tier(p) or active_tier or 'unknown'
                         source = 'direct' if _direct_service_tier(p) else ('timeline' if active_tier else 'unknown')
                         record = (timestamp, acc, model, i, c, o, size, tier, source)
+                        if include_effort: record += (effort,)
                         legacy.append(record)
                         legacy_by_tier[tier].append(record)
                     continue
@@ -275,7 +291,9 @@ def scan(homes):
                     output_tokens = int(u.get('output_tokens') or 0)
                     tier = _direct_service_tier(p) or active_tier or 'unknown'
                     source = 'direct' if _direct_service_tier(p) else ('timeline' if active_tier else 'unknown')
-                    usage_records.append((timestamp, acc, model, input_tokens, cached_input_tokens, output_tokens, input_tokens, tier, source))
+                    record = (timestamp, acc, model, input_tokens, cached_input_tokens, output_tokens, input_tokens, tier, source)
+                    if include_effort: record += (effort,)
+                    usage_records.append(record)
             legacy = _fill_unknown_model(legacy, first_model)
             usage_records = _fill_unknown_model(usage_records, first_model)
             parsed = {
