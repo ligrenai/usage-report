@@ -62,6 +62,35 @@ python3 scripts/render.py --theme dark
 This redacts `meta.homes`. Account labels and usage remain; `meta.prices_overrides`
 can still contain a local path. Review the JSON and embedded report data before sharing.
 
+### Runs and capacity
+
+The read-only `runs.py` commands print JSON to stdout:
+
+```bash
+python3 scripts/runs.py codex /path/to/rollout.jsonl
+python3 scripts/runs.py claude /path/to/transcript.jsonl
+python3 scripts/runs.py capacity --home plus=/path/to/CODEX_HOME
+```
+
+`codex` reports each rollout's session, model, effort, event span, tokens from
+the same provider scanner as `collect.py`, command count, and union of paired
+command intervals. Unpaired events make command busy time `NOT-MEASURED` with
+a reason. Primary five-hour and secondary weekly snapshots include first and
+last percentages, reset times, and a delta only when both samples are in the
+same window.
+
+`claude` streams transcripts line by line. It takes the maximum of each usage
+field for each `message.id`, then sums across unique API messages. The raw
+`block_sum_output_tokens` remains available for comparison; model IDs, effort
+fields present in the transcript, compactions, and timestamp bounds are shown.
+
+`capacity` scans only `sessions/` for each labeled Codex home. It groups quota
+samples by `resets_at` rounded to ten-minute boundaries, separately for five-hour and weekly windows, then
+attributes token records in each observed interval by model and effort. It
+reports input, cached, output, uncached, and `billable_*` tokens per observed
+quota percentage point. A window is `partial` unless local samples cover
+0→100%. This is a local benchmark; usage on other machines is invisible.
+
 ### Common CLI flags
 
 | Script | Flags | Purpose |
